@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { COMPANY_STATUSES } = require('../constants');
 
 const CompanySchema = new mongoose.Schema({
   userId: {
@@ -22,7 +23,7 @@ const CompanySchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'approved', 'rejected'],
+    enum: COMPANY_STATUSES,
     default: 'pending'
   },
   rejectionReason: {

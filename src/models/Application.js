@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { APPLICATION_STATUSES } = require('../constants');
 
 const ApplicationSchema = new mongoose.Schema({
   studentId: {
@@ -13,7 +14,7 @@ const ApplicationSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'reviewed', 'hired', 'rejected', 'withdrawn'],
+    enum: APPLICATION_STATUSES,
     default: 'pending'
   },
   rejectionReason: {

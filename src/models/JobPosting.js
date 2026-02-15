@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { JOB_STATUSES, JOB_TYPES } = require('../constants');
 
 const JobPostingSchema = new mongoose.Schema({
   companyId: {
@@ -34,9 +35,7 @@ const JobPostingSchema = new mongoose.Schema({
   jobType: {
     type: String,
     required: true,
-    minlength: 2,
-    maxlength: 50,
-    trim: true
+    enum: JOB_TYPES
   },
   salaryRange: {
     type: String,
@@ -49,7 +48,7 @@ const JobPostingSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'approved', 'rejected', 'closed'],
+    enum: JOB_STATUSES,
     default: 'pending'
   },
   rejectionReason: {
