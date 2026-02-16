@@ -24,7 +24,7 @@ const checkSubscriptionStatus = async (studentId) => {
   }
 
   const subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
-    .populate('serviceId', 'name maxApplications price');
+    .populate('serviceId', 'name description maxApplications price features isActive');
 
   if (!subscription) {
     await Student.findByIdAndUpdate(studentId, {
@@ -77,10 +77,14 @@ const checkSubscriptionStatus = async (studentId) => {
 };
 
 const getApplicationLimit = async (studentId) => {
-  const status = await checkSubscriptionStatus(studentId);
+  const student = await Student.findById(studentId);
 
-  if (status.isActive && status.subscription?.serviceId?.maxApplications) {
-    return status.subscription.serviceId.maxApplications;
+  if (!student) {
+    return FREE_TIER_MAX_APPLICATIONS;
+  }
+
+  if (student.subscriptionTier === 'paid') {
+    return Infinity;
   }
 
   return FREE_TIER_MAX_APPLICATIONS;

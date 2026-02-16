@@ -32,8 +32,11 @@ exports.getDashboard = async (req, res) => {
       }
     ]);
 
+    const applicationLimit = await getApplicationLimit(student._id);
+
     res.json({
       applicationsUsed: stats[0]?.applicationsUsed || 0,
+      applicationLimit,
       pendingApplications: stats[0]?.pendingApplications || 0,
       isHired: student.isHired
     });
@@ -188,21 +191,21 @@ exports.applyToJob = async (req, res) => {
     }
 
     if (student.isHired) {
-      return res.status(400).json({
-        error: 'You have already been hired and cannot apply to more jobs'
+      return res.status(403).json({
+        error: 'Hired students cannot apply to new jobs.'
       });
     }
 
-    const activeCount = await Application.countDocuments({
+    const applicationsUsed = await Application.countDocuments({
       studentId: student._id,
       status: { $ne: 'withdrawn' }
     });
 
-    const maxActiveApplications = await getApplicationLimit(student._id);
+    const applicationLimit = await getApplicationLimit(student._id);
 
-    if (activeCount >= maxActiveApplications) {
-      return res.status(400).json({
-        error: `Application limit reached. You can only have ${maxActiveApplications} active applications. Withdraw an existing application to apply to new jobs.`
+    if (applicationLimit !== Infinity && applicationsUsed >= applicationLimit) {
+      return res.status(403).json({
+        error: 'Application limit reached'
       });
     }
 
