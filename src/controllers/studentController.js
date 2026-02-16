@@ -23,7 +23,7 @@ exports.getDashboard = async (req, res) => {
         $group: {
           _id: null,
           applicationsUsed: {
-            $sum: { $cond: [{ $ne: ['$status', 'withdrawn'] }, 1, 0] }
+            $sum: { $cond: [{ $not: [{ $in: ['$status', ['withdrawn', 'rejected']] }] }, 1, 0] }
           },
           pendingApplications: {
             $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] }
@@ -33,10 +33,13 @@ exports.getDashboard = async (req, res) => {
     ]);
 
     const applicationLimit = await getApplicationLimit(student._id);
+    const hasUnlimitedApplications = applicationLimit === Infinity;
 
     res.json({
       applicationsUsed: stats[0]?.applicationsUsed || 0,
-      applicationLimit,
+      applicationLimit: hasUnlimitedApplications ? null : applicationLimit,
+      hasUnlimitedApplications,
+      subscriptionTier: student.subscriptionTier,
       pendingApplications: stats[0]?.pendingApplications || 0,
       isHired: student.isHired
     });
@@ -196,17 +199,13 @@ exports.applyToJob = async (req, res) => {
       });
     }
 
-    const applicationsUsed = await Application.countDocuments({
+    const activeApplications = await Application.countDocuments({
       studentId: student._id,
-      status: { $ne: 'withdrawn' }
+      status: { $nin: ['withdrawn', 'rejected'] }
     });
 
-    const applicationLimit = await getApplicationLimit(student._id);
-
-    if (applicationLimit !== Infinity && applicationsUsed >= applicationLimit) {
-      return res.status(403).json({
-        error: 'Application limit reached'
-      });
+    if (student.subscriptionTier !== 'paid' && activeApplications >= 2) {
+      return res.status(403).json({ error: 'Application limit reached' });
     }
 
     const existingApp = await Application.findOne({

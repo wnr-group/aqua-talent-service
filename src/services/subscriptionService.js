@@ -79,14 +79,7 @@ const checkSubscriptionStatus = async (studentId) => {
 const getApplicationLimit = async (studentId) => {
   const student = await Student.findById(studentId);
 
-  if (!student) {
-    return FREE_TIER_MAX_APPLICATIONS;
-  }
-
-  if (student.subscriptionTier === 'paid') {
-    return Infinity;
-  }
-
+  if (student?.subscriptionTier === 'paid') return Infinity;
   return FREE_TIER_MAX_APPLICATIONS;
 };
 
