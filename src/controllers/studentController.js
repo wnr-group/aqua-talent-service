@@ -3,12 +3,11 @@ const mongoose = require('mongoose');
 const Student = require('../models/Student');
 const JobPosting = require('../models/JobPosting');
 const Application = require('../models/Application');
+const { getApplicationLimit } = require('../services/subscriptionService');
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-
-const MAX_ACTIVE_APPLICATIONS = 2;
 
 exports.getDashboard = async (req, res) => {
   try {
@@ -199,9 +198,11 @@ exports.applyToJob = async (req, res) => {
       status: { $ne: 'withdrawn' }
     });
 
-    if (activeCount >= MAX_ACTIVE_APPLICATIONS) {
+    const maxActiveApplications = await getApplicationLimit(student._id);
+
+    if (activeCount >= maxActiveApplications) {
       return res.status(400).json({
-        error: 'Application limit reached. You can only have 2 active applications. Withdraw an existing application to apply to new jobs.'
+        error: `Application limit reached. You can only have ${maxActiveApplications} active applications. Withdraw an existing application to apply to new jobs.`
       });
     }
 

@@ -12,9 +12,15 @@ const JOB_TYPES = [
   'Freelance'
 ];
 
+const SUBSCRIPTION_STATUSES = ['active', 'expired', 'cancelled', 'pending'];
+
+const SUBSCRIPTION_TIERS = ['free', 'paid'];
+
 module.exports = {
   JOB_STATUSES,
   APPLICATION_STATUSES,
   COMPANY_STATUSES,
-  JOB_TYPES
+  JOB_TYPES,
+  SUBSCRIPTION_STATUSES,
+  SUBSCRIPTION_TIERS
 };

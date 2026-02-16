@@ -112,6 +112,8 @@ exports.login = async (req, res) => {
       email: student.email,
       profileLink: student.profileLink,
       isHired: student.isHired,
+      currentSubscriptionId: student.currentSubscriptionId,
+      subscriptionTier: student.subscriptionTier,
       createdAt: student.createdAt
     } : null
   }
@@ -172,6 +174,8 @@ exports.getMe = async (req, res) => {
          email: student.email,
          profileLink: student.profileLink,
          isHired: student.isHired,
+         currentSubscriptionId: student.currentSubscriptionId,
+         subscriptionTier: student.subscriptionTier,
          createdAt: student.createdAt
   } : null
 });

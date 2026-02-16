@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { SUBSCRIPTION_TIERS } = require('../constants');
 
 const StudentSchema = new mongoose.Schema({
   userId: {
@@ -28,6 +29,16 @@ const StudentSchema = new mongoose.Schema({
   isHired: {
     type: Boolean,
     default: false
+  },
+  currentSubscriptionId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'ActiveSubscription',
+    default: null
+  },
+  subscriptionTier: {
+    type: String,
+    enum: SUBSCRIPTION_TIERS,
+    default: 'free'
   },
   createdAt: {
     type: Date,
