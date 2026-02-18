@@ -11,6 +11,8 @@ router.use(requireUserType('admin'));
 router.get('/dashboard', adminController.getDashboard);
 router.get('/companies', adminController.getCompanies);
 router.patch('/companies/:companyId', adminController.updateCompany);
+router.get('/companies/:companyId/profile', adminController.getCompanyProfileAdmin);
+router.patch('/companies/:companyId/profile', adminController.updateCompanyProfileAdmin);
 router.get('/jobs', adminController.getJobs);
 router.patch('/jobs/:jobId', adminController.updateJob);
 router.get('/applications', adminController.getApplications);

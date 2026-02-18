@@ -4,8 +4,18 @@ const Company = require('../models/Company');
 const JobPosting = require('../models/JobPosting');
 const Student = require('../models/Student');
 const Application = require('../models/Application');
-const { updateCompanyStatusSchema, updateJobStatusSchema, adminUpdateApplicationSchema } = require('../utils/validation');
+const {
+  updateCompanyStatusSchema,
+  updateJobStatusSchema,
+  adminUpdateApplicationSchema,
+  companyProfileSchema
+} = require('../utils/validation');
 const { COMPANY_STATUSES, JOB_STATUSES, APPLICATION_STATUSES, JOB_TYPES } = require('../constants');
+const {
+  applyCompanyProfileUpdates,
+  buildCompanyProfileResponse,
+  invalidatePublicCompanyProfileCache
+} = require('../services/companyProfileService');
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -156,7 +166,7 @@ exports.updateCompany = async (req, res) => {
     const updatedCompany = await Company.findByIdAndUpdate(
       companyId,
       { $set: updateFields },
-      { new: true }
+      { returnDocument: 'after' }
     ).populate('userId', 'username');
 
     res.json({
@@ -294,7 +304,7 @@ exports.updateJob = async (req, res) => {
     const updatedJob = await JobPosting.findByIdAndUpdate(
       jobId,
       { $set: updateFields },
-      { new: true }
+      { returnDocument: 'after' }
     ).populate('companyId', 'name');
 
     // If job is closed, reject all pending/reviewed applications
@@ -499,6 +509,88 @@ exports.getApplications = async (req, res) => {
   }
 };
 
+exports.getCompanyProfileAdmin = async (req, res) => {
+  try {
+    const { companyId } = req.params;
+
+    const company = await Company.findById(companyId);
+
+    if (!company) {
+      return res.status(404).json({ message: 'Company not found' });
+    }
+
+    return res.json(company);
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+exports.updateCompanyProfileAdmin = async (req, res) => {
+  try {
+    const { companyId } = req.params;
+    const {
+      description,
+      website,
+      industry,
+      size,
+      foundedYear,
+      socialLinks
+    } = req.body || {};
+
+    if (!mongoose.Types.ObjectId.isValid(companyId)) {
+      return res.status(400).json({ message: 'Invalid company ID format' });
+    }
+
+    const isValidUrl = (value) => {
+      if (!value) return true;
+      try {
+        new URL(value);
+        return true;
+      } catch (err) {
+        return false;
+      }
+    };
+
+    if (!isValidUrl(website)) {
+      return res.status(400).json({ message: 'Invalid website URL' });
+    }
+
+    if (!isValidUrl(socialLinks?.linkedin)) {
+      return res.status(400).json({ message: 'Invalid LinkedIn URL' });
+    }
+
+    if (!isValidUrl(socialLinks?.twitter)) {
+      return res.status(400).json({ message: 'Invalid Twitter URL' });
+    }
+
+    const company = await Company.findById(companyId);
+
+    if (!company) {
+      return res.status(404).json({ message: 'Company not found' });
+    }
+
+    if (description !== undefined) company.description = description;
+    if (website !== undefined) company.website = website;
+    if (industry !== undefined) company.industry = industry;
+    if (size !== undefined) company.size = size;
+    if (foundedYear !== undefined) company.foundedYear = foundedYear;
+
+    if (socialLinks !== undefined) {
+      company.socialLinks = {
+        linkedin: socialLinks?.linkedin ?? company.socialLinks?.linkedin ?? null,
+        twitter: socialLinks?.twitter ?? company.socialLinks?.twitter ?? null
+      };
+    }
+
+    await company.save();
+    invalidatePublicCompanyProfileCache(company._id);
+
+    return res.status(200).json(company);
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
 exports.updateApplication = async (req, res) => {
   try {
     const { appId } = req.params;
@@ -538,7 +630,7 @@ exports.updateApplication = async (req, res) => {
     const updatedApp = await Application.findByIdAndUpdate(
       appId,
       { $set: updateFields },
-      { new: true }
+      { returnDocument: 'after' }
     )
       .populate('studentId', 'fullName email profileLink isHired')
       .populate({

@@ -78,7 +78,7 @@ exports.getJobs = async (req, res) => {
 
     const [jobs, total] = await Promise.all([
       JobPosting.find(query)
-        .populate('companyId', 'name')
+        .populate('companyId', 'name logo industry size website')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNum)
@@ -100,7 +100,11 @@ exports.getJobs = async (req, res) => {
         createdAt: jobObj.createdAt,
         company: jobObj.companyId ? {
           id: jobObj.companyId._id,
-          name: jobObj.companyId.name
+          name: jobObj.companyId.name,
+          logo: jobObj.companyId.logo,
+          industry: jobObj.companyId.industry,
+          size: jobObj.companyId.size,
+          website: jobObj.companyId.website
         } : null
       };
     });
@@ -129,7 +133,7 @@ exports.getJob = async (req, res) => {
     }
 
     const job = await JobPosting.findOne({ _id: jobId, status: 'approved' })
-      .populate('companyId', 'name')
+      .populate('companyId', 'name logo description industry size website socialLinks foundedYear')
       .select('-rejectionReason -approvedAt -status');
 
     if (!job) {
@@ -168,7 +172,17 @@ exports.getJob = async (req, res) => {
       createdAt: jobObj.createdAt,
       company: jobObj.companyId ? {
         id: jobObj.companyId._id,
-        name: jobObj.companyId.name
+        name: jobObj.companyId.name,
+        logo: jobObj.companyId.logo,
+        description: jobObj.companyId.description,
+        industry: jobObj.companyId.industry,
+        size: jobObj.companyId.size,
+        website: jobObj.companyId.website,
+        socialLinks: {
+          linkedin: jobObj.companyId.socialLinks?.linkedin || null,
+          twitter: jobObj.companyId.socialLinks?.twitter || null
+        },
+        foundedYear: jobObj.companyId.foundedYear
       } : null,
       hasApplied,
       applicationStatus
@@ -237,7 +251,7 @@ exports.applyToJob = async (req, res) => {
             createdAt: new Date()
           }
         },
-        { new: true }
+        { returnDocument: 'after' }
       );
     } else {
       application = await Application.create({

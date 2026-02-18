@@ -4,8 +4,17 @@ const Company = require('../models/Company');
 const JobPosting = require('../models/JobPosting');
 const Application = require('../models/Application');
 const Student = require('../models/Student');
-const { createJobSchema, updateJobSchema } = require('../utils/validation');
+const { createJobSchema, updateJobSchema, companyProfileSchema } = require('../utils/validation');
 const { JOB_STATUSES, JOB_TYPES, APPLICATION_STATUSES } = require('../constants');
+const { uploadCompanyLogo } = require('../services/mediaService');
+const {
+  applyCompanyProfileUpdates,
+  buildCompanyProfileResponse,
+  buildPublicCompanyProfile,
+  getCachedPublicCompanyProfile,
+  setCachedPublicCompanyProfile,
+  invalidatePublicCompanyProfileCache
+} = require('../services/companyProfileService');
 
 const VISIBLE_APPLICATION_STATUSES = ['reviewed', 'hired', 'rejected'];
 
@@ -241,7 +250,7 @@ exports.updateJob = async (req, res) => {
     const updatedJob = await JobPosting.findByIdAndUpdate(
       jobId,
       { $set: updateFields },
-      { new: true, runValidators: true }
+      { returnDocument: 'after', runValidators: true }
     );
 
     res.json(updatedJob);
@@ -459,6 +468,111 @@ exports.getAllApplications = async (req, res) => {
         totalPages: Math.ceil(total / limitNum)
       }
     });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.getProfile = async (req, res) => {
+  try {
+    const company = await Company.findOne({ userId: req.user.userId });
+
+    if (!company) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
+    res.json({ profile: buildCompanyProfileResponse(company) });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.updateProfile = async (req, res) => {
+  try {
+    const parsed = companyProfileSchema.parse(req.body);
+    const company = await Company.findOne({ userId: req.user.userId });
+
+    if (!company) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
+    try {
+      applyCompanyProfileUpdates(company, parsed, { allowNameEdit: false });
+    } catch (error) {
+      if (error.message === 'APPROVED_COMPANY_NAME_READONLY') {
+        return res.status(400).json({ error: 'Company name cannot be edited after approval' });
+      }
+      throw error;
+    }
+
+    await company.save();
+    invalidatePublicCompanyProfileCache(company._id);
+
+    res.json({ profile: buildCompanyProfileResponse(company) });
+  } catch (error) {
+    if (error.name === 'ZodError') {
+      return res.status(400).json({ error: error.errors[0].message });
+    }
+
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.uploadLogo = async (req, res) => {
+  try {
+    const company = await Company.findOne({ userId: req.user.userId });
+
+    if (!company) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'Logo file is required' });
+    }
+
+    try {
+      const logoUrl = await uploadCompanyLogo(req.file);
+      company.logo = logoUrl;
+      await company.save();
+      invalidatePublicCompanyProfileCache(company._id);
+
+      return res.json({ logo: logoUrl });
+    } catch (uploadError) {
+      console.error(uploadError);
+      return res.status(500).json({ error: 'Failed to upload logo' });
+    }
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.getPublicProfile = async (req, res) => {
+  try {
+    const { companyId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(companyId)) {
+      return res.status(400).json({ error: 'Invalid company ID format' });
+    }
+
+    const cached = getCachedPublicCompanyProfile(companyId);
+    if (cached) {
+      return res.json({ profile: cached });
+    }
+
+    const company = await Company.findOne({ _id: companyId, status: 'approved' });
+
+    if (!company) {
+      return res.status(404).json({ error: 'Company profile not found' });
+    }
+
+    const profile = buildPublicCompanyProfile(company);
+    setCachedPublicCompanyProfile(companyId, profile);
+
+    res.json({ profile });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });

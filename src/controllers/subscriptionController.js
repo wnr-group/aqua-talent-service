@@ -252,7 +252,7 @@ exports.updateSubscription = async (req, res) => {
     const updatedSubscription = await ActiveSubscription.findByIdAndUpdate(
       subscription._id,
       { $set: updateFields },
-      { new: true }
+      { returnDocument: 'after' }
     ).populate('serviceId', 'name description maxApplications price features');
 
     if (updatedSubscription.status === 'cancelled') {
@@ -301,7 +301,7 @@ exports.cancelSubscription = async (req, res) => {
           autoRenew: false
         }
       },
-      { new: true }
+      { returnDocument: 'after' }
     ).populate('serviceId', 'name description maxApplications price features');
 
     if (!subscription) {

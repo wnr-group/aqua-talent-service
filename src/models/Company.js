@@ -1,5 +1,16 @@
 const mongoose = require('mongoose');
-const { COMPANY_STATUSES } = require('../constants');
+const { COMPANY_STATUSES, COMPANY_INDUSTRIES, COMPANY_SIZES } = require('../constants');
+
+const SocialLinksSchema = new mongoose.Schema({
+  linkedin: {
+    type: String,
+    default: null
+  },
+  twitter: {
+    type: String,
+    default: null
+  }
+}, { _id: false });
 
 const CompanySchema = new mongoose.Schema({
   userId: {
@@ -25,6 +36,39 @@ const CompanySchema = new mongoose.Schema({
     type: String,
     enum: COMPANY_STATUSES,
     default: 'pending'
+  },
+  logo: {
+    type: String,
+    default: null
+  },
+  website: {
+    type: String,
+    default: null
+  },
+  description: {
+    type: String,
+    maxlength: 2000,
+    default: null
+  },
+  industry: {
+    type: String,
+    enum: [...COMPANY_INDUSTRIES, null],
+    default: null
+  },
+  size: {
+    type: String,
+    enum: [...COMPANY_SIZES, null],
+    default: null
+  },
+  socialLinks: {
+    type: SocialLinksSchema,
+    default: {}
+  },
+  foundedYear: {
+    type: Number,
+    min: 1800,
+    max: new Date().getFullYear(),
+    default: null
   },
   rejectionReason: {
     type: String,
