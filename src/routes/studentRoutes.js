@@ -2,8 +2,10 @@ const express = require('express');
 const router = express.Router();
 
 const studentController = require('../controllers/studentController');
+const studentMediaController = require('../controllers/studentMediaController');
 const subscriptionController = require('../controllers/subscriptionController');
 const { requireAuth, requireUserType, optionalAuth } = require('../middleware/auth');
+const { resumeUpload, videoUpload } = require('../middleware/upload');
 
 // Dashboard requires student authentication
 router.get('/dashboard', requireAuth, requireUserType('student'), studentController.getDashboard);
@@ -20,6 +22,36 @@ router.patch('/applications/:appId/withdraw', requireAuth, requireUserType('stud
 // Profile endpoints (require student auth)
 router.get('/profile', requireAuth, requireUserType('student'), studentController.getProfile);
 router.patch('/profile', requireAuth, requireUserType('student'), studentController.updateProfile);
+router.post(
+	'/profile/resume',
+	requireAuth,
+	requireUserType('student'),
+	(req, res, next) => {
+		resumeUpload.single('resume')(req, res, (err) => {
+			if (err) {
+				return res.status(400).json({ error: err.message });
+			}
+			next();
+		});
+	},
+	studentController.uploadResume
+);
+router.post(
+	'/profile/video',
+	requireAuth,
+	requireUserType('student'),
+	(req, res, next) => {
+		videoUpload.single('video')(req, res, (err) => {
+			if (err) {
+				const message = err.code === 'LIMIT_FILE_SIZE' ? 'Video must be under 30MB' : err.message;
+				return res.status(400).json({ error: message });
+			}
+			next();
+		});
+	},
+	studentMediaController.uploadIntroVideo
+);
+router.get('/profile/completeness', requireAuth, requireUserType('student'), studentController.getProfileCompleteness);
 
 // Subscription endpoints (require student auth)
 router.get('/subscription', requireAuth, requireUserType('student'), subscriptionController.getCurrentSubscription);
