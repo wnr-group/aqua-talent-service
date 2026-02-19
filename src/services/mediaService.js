@@ -2,8 +2,8 @@ const crypto = require('crypto');
 const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
-const AWS_REGION = process.env.AWS_REGION;
-const AWS_S3_BUCKET = process.env.AWS_S3_BUCKET;
+const BUCKETEER_AWS_REGION = process.env.BUCKETEER_AWS_REGION;
+const BUCKETEER_BUCKET_NAME = process.env.BUCKETEER_BUCKET_NAME;
 
 let s3Client;
 
@@ -12,17 +12,17 @@ const MAX_VIDEO_BYTES = 30 * 1024 * 1024;
 const PRESIGNED_URL_EXPIRY = 3600; // 1 hour
 
 const getS3Client = () => {
-  if (!AWS_REGION) {
-    throw new Error('AWS_REGION is not configured');
+  if (!BUCKETEER_AWS_REGION) {
+    throw new Error('BUCKETEER_AWS_REGION is not configured');
   }
 
   if (!s3Client) {
     s3Client = new S3Client({
-      region: AWS_REGION,
-      credentials: process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY
+      region: BUCKETEER_AWS_REGION,
+      credentials: process.env.BUCKETEER_AWS_ACCESS_KEY_ID && process.env.BUCKETEER_AWS_SECRET_ACCESS_KEY
         ? {
-            accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+            accessKeyId: process.env.BUCKETEER_AWS_ACCESS_KEY_ID,
+            secretAccessKey: process.env.BUCKETEER_AWS_SECRET_ACCESS_KEY
           }
         : undefined
     });
@@ -46,8 +46,8 @@ const extensionFromMime = (mime) => {
 };
 
 const assertBucketConfigured = () => {
-  if (!AWS_S3_BUCKET) {
-    throw new Error('AWS_S3_BUCKET is not configured');
+  if (!BUCKETEER_BUCKET_NAME) {
+    throw new Error('BUCKETEER_BUCKET_NAME is not configured');
   }
 };
 
@@ -65,7 +65,7 @@ const getPresignedUrl = async (key) => {
   const client = getS3Client();
 
   const command = new GetObjectCommand({
-    Bucket: AWS_S3_BUCKET,
+    Bucket: BUCKETEER_BUCKET_NAME,
     Key: key
   });
 
@@ -83,7 +83,7 @@ const uploadCompanyLogo = async (file) => {
   const key = `company-logos/${crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex')}.${extensionFromMime(file.mimetype)}`;
 
   const command = new PutObjectCommand({
-    Bucket: AWS_S3_BUCKET,
+    Bucket: BUCKETEER_BUCKET_NAME,
     Key: key,
     Body: file.buffer,
     ContentType: file.mimetype || 'application/octet-stream'
@@ -123,7 +123,7 @@ const uploadStudentResume = async (file) => {
   const key = `student-resumes/${crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex')}.pdf`;
 
   const command = new PutObjectCommand({
-    Bucket: AWS_S3_BUCKET,
+    Bucket: BUCKETEER_BUCKET_NAME,
     Key: key,
     Body: file.buffer,
     ContentType: 'application/pdf'
@@ -157,7 +157,7 @@ const uploadStudentVideo = async (file, studentId) => {
   const key = `student-videos/${studentId}/${Date.now()}-${safeName}`;
 
   const command = new PutObjectCommand({
-    Bucket: AWS_S3_BUCKET,
+    Bucket: BUCKETEER_BUCKET_NAME,
     Key: key,
     Body: file.buffer,
     ContentType: file.mimetype
