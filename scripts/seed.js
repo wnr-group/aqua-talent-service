@@ -309,11 +309,31 @@ const seedDatabase = async () => {
         salaryRange: '$4000-$5500',
         status: 'approved',
         approvedAt: new Date()
+      },
+      {
+        companyId: company1._id,
+        title: 'AI Research Intern',
+        description: null,
+        requirements: null,
+        location: null,
+        jobType: null,
+        salaryRange: null,
+        status: 'draft'
+      },
+      {
+        companyId: company3._id,
+        title: 'Full Stack Developer',
+        description: 'Develop end-to-end web applications using modern JavaScript frameworks. You will work on both frontend and backend components of our platform.',
+        requirements: 'Experience with React, Node.js, and relational databases',
+        location: 'Remote',
+        jobType: 'Full-time',
+        salaryRange: '$6000-$9000',
+        status: 'unpublished'
       }
     ];
 
     await JobPosting.insertMany(jobs);
-    console.log('Created 20 job postings!');
+    console.log('Created 22 job postings!');
 
     console.log('Database seeded!');
     console.log('\nTest accounts:');

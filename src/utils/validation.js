@@ -57,9 +57,9 @@ const createJobSchema = z.object({
     .max(5000, 'Description must be 50-5000 characters')
     .trim(),
   requirements: z.string()
+    .min(1, 'Requirements are required')
     .max(2000, 'Requirements must be less than 2000 characters')
-    .trim()
-    .optional(),
+    .trim(),
   location: z.string()
     .min(2, 'Location must be 2-100 characters')
     .max(100, 'Location must be 2-100 characters')
@@ -68,16 +68,48 @@ const createJobSchema = z.object({
     errorMap: () => ({ message: `Job type must be one of: ${JOB_TYPES.join(', ')}` })
   }),
   salaryRange: z.string()
+    .min(1, 'Salary range is required')
     .max(50, 'Salary range must be less than 50 characters')
-    .trim()
-    .optional(),
+    .trim(),
   deadline: z.string()
-    .datetime()
-    .optional()
-    .refine(val => !val || new Date(val) > new Date(), 'Deadline must be in the future')
+    .datetime('Application deadline is required')
+    .refine(val => new Date(val) > new Date(), 'Deadline must be in the future')
 });
 
 const updateJobSchema = createJobSchema.partial();
+
+// Draft jobs allow incomplete data — no validation required
+// Preprocess empty strings to undefined so optional() works correctly
+const emptyToUndefined = (val) => (val === '' || val === null || val === undefined) ? undefined : val;
+
+const createDraftJobSchema = z.object({
+  title: z.preprocess(emptyToUndefined, z.string()
+    .max(100, 'Title must be at most 100 characters')
+    .trim()
+    .optional()),
+  description: z.preprocess(emptyToUndefined, z.string()
+    .max(5000, 'Description must be at most 5000 characters')
+    .trim()
+    .optional()),
+  requirements: z.preprocess(emptyToUndefined, z.string()
+    .max(2000, 'Requirements must be less than 2000 characters')
+    .trim()
+    .optional()),
+  location: z.preprocess(emptyToUndefined, z.string()
+    .max(100, 'Location must be at most 100 characters')
+    .trim()
+    .optional()),
+  jobType: z.preprocess(emptyToUndefined, z.enum(JOB_TYPES, {
+    errorMap: () => ({ message: `Job type must be one of: ${JOB_TYPES.join(', ')}` })
+  }).optional()),
+  salaryRange: z.preprocess(emptyToUndefined, z.string()
+    .max(50, 'Salary range must be less than 50 characters')
+    .trim()
+    .optional()),
+  deadline: z.preprocess(emptyToUndefined, z.string()
+    .datetime()
+    .optional())
+}).passthrough();
 
 const updateCompanyStatusSchema = z.object({
   status: z.enum(COMPANY_STATUSES, {
@@ -96,7 +128,7 @@ const updateCompanyStatusSchema = z.object({
 
 const updateJobStatusSchema = z.object({
   status: z.enum(JOB_STATUSES, {
-    errorMap: () => ({ message: 'Status must be approved, rejected, closed, or pending' })
+    errorMap: () => ({ message: `Status must be one of: ${JOB_STATUSES.join(', ')}` })
   }),
   rejectionReason: z.string().trim().optional()
 });
@@ -143,6 +175,7 @@ module.exports = {
   companyRegistrationSchema,
   studentRegistrationSchema,
   createJobSchema,
+  createDraftJobSchema,
   updateJobSchema,
   updateCompanyStatusSchema,
   updateJobStatusSchema,

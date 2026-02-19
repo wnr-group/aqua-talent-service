@@ -4,7 +4,7 @@ const Company = require('../models/Company');
 const JobPosting = require('../models/JobPosting');
 const Application = require('../models/Application');
 const Student = require('../models/Student');
-const { createJobSchema, updateJobSchema, companyProfileSchema } = require('../utils/validation');
+const { createJobSchema, createDraftJobSchema, updateJobSchema, companyProfileSchema } = require('../utils/validation');
 const { JOB_STATUSES, JOB_TYPES, APPLICATION_STATUSES } = require('../constants');
 const { uploadCompanyLogo } = require('../services/mediaService');
 const emailService = require('../services/emailService');
@@ -38,7 +38,9 @@ exports.getDashboard = async (req, res) => {
           _id: null,
           totalJobs: { $sum: 1 },
           activeJobs: { $sum: { $cond: [{ $eq: ['$status', 'approved'] }, 1, 0] } },
-          pendingJobs: { $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] } }
+          pendingJobs: { $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] } },
+          draftJobs: { $sum: { $cond: [{ $eq: ['$status', 'draft'] }, 1, 0] } },
+          unpublishedJobs: { $sum: { $cond: [{ $eq: ['$status', 'unpublished'] }, 1, 0] } }
         }
       }
     ]);
@@ -68,6 +70,8 @@ exports.getDashboard = async (req, res) => {
       totalJobs: jobStats[0]?.totalJobs || 0,
       activeJobs: jobStats[0]?.activeJobs || 0,
       pendingJobs: jobStats[0]?.pendingJobs || 0,
+      draftJobs: jobStats[0]?.draftJobs || 0,
+      unpublishedJobs: jobStats[0]?.unpublishedJobs || 0,
       totalApplications: appStats[0]?.totalApplications || 0,
       reviewedApplications: appStats[0]?.reviewedApplications || 0
     });
@@ -88,7 +92,7 @@ exports.getJobs = async (req, res) => {
     }
 
     if (status && !JOB_STATUSES.includes(status)) {
-      return res.status(400).json({ error: 'Status must be pending, approved, rejected, or closed' });
+      return res.status(400).json({ error: `Status must be one of: ${JOB_STATUSES.join(', ')}` });
     }
 
     if (jobType && !JOB_TYPES.includes(jobType)) {
@@ -147,7 +151,13 @@ exports.getJobs = async (req, res) => {
 
 exports.createJob = async (req, res) => {
   try {
-    const parsed = createJobSchema.parse(req.body);
+    const body = req.body || {};
+    const requestedStatus = body.status === 'draft' ? 'draft' : 'pending';
+
+    // Use relaxed validation for drafts, strict for pending
+    const parsed = requestedStatus === 'draft'
+      ? createDraftJobSchema.parse(body)
+      : createJobSchema.parse(body);
 
     const company = await Company.findOne({ userId: req.user.userId });
 
@@ -155,22 +165,37 @@ exports.createJob = async (req, res) => {
       return res.status(404).json({ error: 'Company not found' });
     }
 
+    // Safely handle all optional fields — default to null when missing
+    const title = parsed.title || null;
+    const description = parsed.description || null;
+    const requirements = Array.isArray(parsed.requirements)
+      ? (parsed.requirements.length > 0 ? parsed.requirements.join(', ') : null)
+      : (parsed.requirements || null);
+    const location = parsed.location || null;
+    const jobType = parsed.jobType || null;
+    const salaryRange = parsed.salaryRange || null;
+    const deadline = parsed.deadline ? new Date(parsed.deadline) : null;
+
+    // Safe access for any uploaded files
+    const file = req.files?.[0] || null;
+
     const job = await JobPosting.create({
       companyId: company._id,
-      title: parsed.title,
-      description: parsed.description,
-      requirements: parsed.requirements || null,
-      location: parsed.location,
-      jobType: parsed.jobType,
-      salaryRange: parsed.salaryRange || null,
-      deadline: parsed.deadline ? new Date(parsed.deadline) : null,
-      status: 'pending'
+      title,
+      description,
+      requirements,
+      location,
+      jobType,
+      salaryRange,
+      deadline,
+      status: requestedStatus
     });
 
     res.status(201).json(job);
   } catch (error) {
     if (error.name === 'ZodError') {
-      return res.status(400).json({ error: error.errors[0].message });
+      const message = error.errors?.[0]?.message || 'Validation error';
+      return res.status(400).json({ error: message });
     }
 
     console.error(error);
@@ -217,8 +242,6 @@ exports.updateJob = async (req, res) => {
       return res.status(400).json({ error: 'Invalid job ID format' });
     }
 
-    const parsed = updateJobSchema.parse(req.body);
-
     const company = await Company.findOne({ userId: req.user.userId });
 
     if (!company) {
@@ -235,9 +258,17 @@ exports.updateJob = async (req, res) => {
       return res.status(403).json({ error: 'You can only edit your own job postings' });
     }
 
-    if (job.status !== 'pending') {
-      return res.status(403).json({ error: 'Can only edit jobs that are pending approval' });
+    if (job.status !== 'pending' && job.status !== 'draft') {
+      return res.status(403).json({ error: 'Can only edit jobs that are in draft or pending approval' });
     }
+
+    // Determine if the company wants to submit a draft for review
+    const wantsToSubmit = req.body.status === 'pending' && job.status === 'draft';
+
+    // Use strict validation when submitting for review, relaxed for draft edits
+    const parsed = wantsToSubmit
+      ? updateJobSchema.parse(req.body)
+      : (job.status === 'draft' ? createDraftJobSchema.partial().parse(req.body) : updateJobSchema.parse(req.body));
 
     // Build update fields
     const updateFields = {};
@@ -248,6 +279,46 @@ exports.updateJob = async (req, res) => {
     if (parsed.jobType !== undefined) updateFields.jobType = parsed.jobType;
     if (parsed.salaryRange !== undefined) updateFields.salaryRange = parsed.salaryRange;
     if (parsed.deadline !== undefined) updateFields.deadline = parsed.deadline ? new Date(parsed.deadline) : null;
+
+    // If submitting a draft, validate that required fields are present (either in update or existing doc)
+    if (wantsToSubmit) {
+      const merged = {
+        title: updateFields.title ?? job.title,
+        description: updateFields.description ?? job.description,
+        requirements: updateFields.requirements ?? job.requirements,
+        location: updateFields.location ?? job.location,
+        jobType: updateFields.jobType ?? job.jobType,
+        salaryRange: updateFields.salaryRange ?? job.salaryRange,
+        deadline: updateFields.deadline ?? job.deadline
+      };
+
+      if (!merged.title || merged.title.length < 5) {
+        return res.status(400).json({ error: 'Title must be at least 5 characters to submit for review' });
+      }
+      if (!merged.description || merged.description.length < 50) {
+        return res.status(400).json({ error: 'Description must be at least 50 characters to submit for review' });
+      }
+      if (!merged.requirements) {
+        return res.status(400).json({ error: 'Requirements are required to submit for review' });
+      }
+      if (!merged.location || merged.location.length < 2) {
+        return res.status(400).json({ error: 'Location is required to submit for review' });
+      }
+      if (!merged.jobType) {
+        return res.status(400).json({ error: 'Job type is required to submit for review' });
+      }
+      if (!merged.salaryRange) {
+        return res.status(400).json({ error: 'Salary range is required to submit for review' });
+      }
+      if (!merged.deadline) {
+        return res.status(400).json({ error: 'Application deadline is required to submit for review' });
+      }
+      if (new Date(merged.deadline) <= new Date()) {
+        return res.status(400).json({ error: 'Deadline must be in the future' });
+      }
+
+      updateFields.status = 'pending';
+    }
 
     const updatedJob = await JobPosting.findByIdAndUpdate(
       jobId,
@@ -261,6 +332,94 @@ exports.updateJob = async (req, res) => {
       return res.status(400).json({ error: error.errors[0].message });
     }
 
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.unpublishJob = async (req, res) => {
+  try {
+    const { jobId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(jobId)) {
+      return res.status(400).json({ error: 'Invalid job ID format' });
+    }
+
+    const company = await Company.findOne({ userId: req.user.userId });
+
+    if (!company) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
+    const job = await JobPosting.findById(jobId);
+
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    if (!job.companyId.equals(company._id)) {
+      return res.status(403).json({ error: 'You can only manage your own job postings' });
+    }
+
+    if (job.status !== 'approved') {
+      return res.status(400).json({ error: 'Only approved jobs can be unpublished' });
+    }
+
+    const updatedJob = await JobPosting.findByIdAndUpdate(
+      jobId,
+      { $set: { status: 'unpublished' } },
+      { returnDocument: 'after' }
+    );
+
+    res.json(updatedJob);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.republishJob = async (req, res) => {
+  try {
+    const { jobId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(jobId)) {
+      return res.status(400).json({ error: 'Invalid job ID format' });
+    }
+
+    const company = await Company.findOne({ userId: req.user.userId });
+
+    if (!company) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
+    const job = await JobPosting.findById(jobId);
+
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    if (!job.companyId.equals(company._id)) {
+      return res.status(403).json({ error: 'You can only manage your own job postings' });
+    }
+
+    if (job.status !== 'unpublished') {
+      return res.status(400).json({ error: 'Only unpublished jobs can be republished' });
+    }
+
+    const updatedJob = await JobPosting.findByIdAndUpdate(
+      jobId,
+      {
+        $set: {
+          status: 'pending',
+          approvedAt: null,
+          rejectionReason: null
+        }
+      },
+      { returnDocument: 'after' }
+    );
+
+    res.json(updatedJob);
+  } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
   }
