@@ -3,12 +3,11 @@ const mongoose = require('mongoose');
 const Student = require('../models/Student');
 const JobPosting = require('../models/JobPosting');
 const Application = require('../models/Application');
+const { getApplicationLimit } = require('../services/subscriptionService');
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-
-const MAX_ACTIVE_APPLICATIONS = 2;
 
 exports.getDashboard = async (req, res) => {
   try {
@@ -24,7 +23,7 @@ exports.getDashboard = async (req, res) => {
         $group: {
           _id: null,
           applicationsUsed: {
-            $sum: { $cond: [{ $ne: ['$status', 'withdrawn'] }, 1, 0] }
+            $sum: { $cond: [{ $not: [{ $in: ['$status', ['withdrawn', 'rejected']] }] }, 1, 0] }
           },
           pendingApplications: {
             $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] }
@@ -33,8 +32,14 @@ exports.getDashboard = async (req, res) => {
       }
     ]);
 
+    const applicationLimit = await getApplicationLimit(student._id);
+    const hasUnlimitedApplications = applicationLimit === Infinity;
+
     res.json({
       applicationsUsed: stats[0]?.applicationsUsed || 0,
+      applicationLimit: hasUnlimitedApplications ? null : applicationLimit,
+      hasUnlimitedApplications,
+      subscriptionTier: student.subscriptionTier,
       pendingApplications: stats[0]?.pendingApplications || 0,
       isHired: student.isHired
     });
@@ -189,20 +194,18 @@ exports.applyToJob = async (req, res) => {
     }
 
     if (student.isHired) {
-      return res.status(400).json({
-        error: 'You have already been hired and cannot apply to more jobs'
+      return res.status(403).json({
+        error: 'Hired students cannot apply to new jobs.'
       });
     }
 
-    const activeCount = await Application.countDocuments({
+    const activeApplications = await Application.countDocuments({
       studentId: student._id,
-      status: { $ne: 'withdrawn' }
+      status: { $nin: ['withdrawn', 'rejected'] }
     });
 
-    if (activeCount >= MAX_ACTIVE_APPLICATIONS) {
-      return res.status(400).json({
-        error: 'Application limit reached. You can only have 2 active applications. Withdraw an existing application to apply to new jobs.'
-      });
+    if (student.subscriptionTier !== 'paid' && activeApplications >= 2) {
+      return res.status(403).json({ error: 'Application limit reached' });
     }
 
     const existingApp = await Application.findOne({
