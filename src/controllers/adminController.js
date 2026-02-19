@@ -4,6 +4,10 @@ const Company = require('../models/Company');
 const JobPosting = require('../models/JobPosting');
 const Student = require('../models/Student');
 const Application = require('../models/Application');
+const AvailableService = require('../models/AvailableService');
+const ActiveSubscription = require('../models/ActiveSubscription');
+const PaymentRecord = require('../models/PaymentRecord');
+const SystemConfig = require('../models/SystemConfig');
 const emailService = require('../services/emailService');
 const notificationService = require('../services/notificationService');
 const {
@@ -12,7 +16,7 @@ const {
   adminUpdateApplicationSchema,
   companyProfileSchema
 } = require('../utils/validation');
-const { COMPANY_STATUSES, JOB_STATUSES, APPLICATION_STATUSES, JOB_TYPES } = require('../constants');
+const { COMPANY_STATUSES, JOB_STATUSES, APPLICATION_STATUSES, JOB_TYPES, CONFIG_KEYS, CURRENCIES, BILLING_CYCLES } = require('../constants');
 const { getPresignedUrl } = require('../services/mediaService');
 const {
   applyCompanyProfileUpdates,
@@ -83,19 +87,23 @@ exports.getDashboard = async (req, res) => {
 
 exports.getCompanies = async (req, res) => {
   try {
-    const { status } = req.query;
+    const { status, search, page = 1, limit = 20 } = req.query;
 
     if (status && !COMPANY_STATUSES.includes(status)) {
       return res.status(400).json({ error: 'Status must be pending, approved, or rejected' });
     }
 
-    const query = {};
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 20));
+    const skip = (pageNum - 1) * limitNum;
+
+    const matchConditions = {};
     if (status) {
-      query.status = status;
+      matchConditions.status = status;
     }
 
-    const companies = await Company.aggregate([
-      { $match: query },
+    const pipeline = [
+      { $match: matchConditions },
       {
         $lookup: {
           from: 'users',
@@ -104,7 +112,30 @@ exports.getCompanies = async (req, res) => {
           as: 'user'
         }
       },
-      { $unwind: '$user' },
+      { $unwind: '$user' }
+    ];
+
+    // Add search filter after lookup
+    if (search) {
+      const escapedSearch = escapeRegex(search);
+      pipeline.push({
+        $match: {
+          $or: [
+            { name: { $regex: escapedSearch, $options: 'i' } },
+            { email: { $regex: escapedSearch, $options: 'i' } },
+            { 'user.username': { $regex: escapedSearch, $options: 'i' } }
+          ]
+        }
+      });
+    }
+
+    // Count total before pagination
+    const countPipeline = [...pipeline, { $count: 'total' }];
+    const countResult = await Company.aggregate(countPipeline);
+    const total = countResult[0]?.total || 0;
+
+    // Add sorting and pagination
+    pipeline.push(
       {
         $project: {
           _id: 1,
@@ -117,8 +148,12 @@ exports.getCompanies = async (req, res) => {
           approvedAt: 1
         }
       },
-      { $sort: { createdAt: -1 } }
-    ]);
+      { $sort: { createdAt: -1 } },
+      { $skip: skip },
+      { $limit: limitNum }
+    );
+
+    const companies = await Company.aggregate(pipeline);
 
     const result = companies.map(c => ({
       id: c._id.toString(),
@@ -131,7 +166,15 @@ exports.getCompanies = async (req, res) => {
       approvedAt: c.approvedAt
     }));
 
-    res.json({ companies: result });
+    res.json({
+      companies: result,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum)
+      }
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
@@ -303,6 +346,47 @@ exports.getJobs = async (req, res) => {
         limit: limitNum,
         total,
         totalPages: Math.ceil(total / limitNum)
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.getJob = async (req, res) => {
+  try {
+    const { jobId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(jobId)) {
+      return res.status(400).json({ error: 'Invalid job ID format' });
+    }
+
+    const job = await JobPosting.findById(jobId)
+      .populate('companyId', 'name email');
+
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    res.json({
+      id: job._id.toString(),
+      companyId: job.companyId._id.toString(),
+      title: job.title,
+      description: job.description,
+      requirements: job.requirements,
+      location: job.location,
+      jobType: job.jobType,
+      salaryRange: job.salaryRange,
+      deadline: job.deadline,
+      status: job.status,
+      rejectionReason: job.rejectionReason,
+      createdAt: job.createdAt,
+      approvedAt: job.approvedAt,
+      company: {
+        id: job.companyId._id.toString(),
+        name: job.companyId.name,
+        email: job.companyId.email
       }
     });
   } catch (error) {
@@ -771,6 +855,157 @@ exports.updateApplication = async (req, res) => {
   }
 };
 
+// ─── Student Management ───────────────────────────────────────────────────────
+
+exports.getStudents = async (req, res) => {
+  try {
+    const {
+      subscriptionTier,
+      hasActiveApplications,
+      isHired,
+      hasResume,
+      hasVideo,
+      search,
+      page = 1,
+      limit = 20
+    } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 20));
+    const skip = (pageNum - 1) * limitNum;
+
+    // Build aggregation pipeline
+    const pipeline = [];
+
+    // Match conditions for student fields
+    const matchConditions = {};
+
+    if (subscriptionTier && ['free', 'paid'].includes(subscriptionTier)) {
+      matchConditions.subscriptionTier = subscriptionTier;
+    }
+
+    if (isHired !== undefined) {
+      matchConditions.isHired = isHired === 'true';
+    }
+
+    if (hasResume !== undefined) {
+      if (hasResume === 'true') {
+        matchConditions.resumeUrl = { $ne: null };
+      } else {
+        matchConditions.resumeUrl = null;
+      }
+    }
+
+    if (hasVideo !== undefined) {
+      if (hasVideo === 'true') {
+        matchConditions.introVideoUrl = { $ne: null };
+      } else {
+        matchConditions.introVideoUrl = null;
+      }
+    }
+
+    if (search) {
+      const escapedSearch = escapeRegex(search);
+      matchConditions.$or = [
+        { fullName: { $regex: escapedSearch, $options: 'i' } },
+        { email: { $regex: escapedSearch, $options: 'i' } }
+      ];
+    }
+
+    if (Object.keys(matchConditions).length > 0) {
+      pipeline.push({ $match: matchConditions });
+    }
+
+    // Lookup applications to count active ones
+    pipeline.push({
+      $lookup: {
+        from: 'applications',
+        localField: '_id',
+        foreignField: 'studentId',
+        as: 'applications'
+      }
+    });
+
+    // Add computed fields
+    pipeline.push({
+      $addFields: {
+        totalApplications: { $size: '$applications' },
+        activeApplications: {
+          $size: {
+            $filter: {
+              input: '$applications',
+              cond: { $in: ['$$this.status', ['pending', 'reviewed']] }
+            }
+          }
+        }
+      }
+    });
+
+    // Filter by hasActiveApplications if specified
+    if (hasActiveApplications !== undefined) {
+      if (hasActiveApplications === 'true') {
+        pipeline.push({ $match: { activeApplications: { $gt: 0 } } });
+      } else {
+        pipeline.push({ $match: { activeApplications: 0 } });
+      }
+    }
+
+    // Count total before pagination
+    const countPipeline = [...pipeline, { $count: 'total' }];
+    const countResult = await Student.aggregate(countPipeline);
+    const total = countResult[0]?.total || 0;
+
+    // Add sorting and pagination
+    pipeline.push(
+      { $sort: { createdAt: -1 } },
+      { $skip: skip },
+      { $limit: limitNum },
+      {
+        $project: {
+          _id: 1,
+          fullName: 1,
+          email: 1,
+          subscriptionTier: 1,
+          isHired: 1,
+          hasResume: { $cond: [{ $ne: ['$resumeUrl', null] }, true, false] },
+          hasVideo: { $cond: [{ $ne: ['$introVideoUrl', null] }, true, false] },
+          totalApplications: 1,
+          activeApplications: 1,
+          createdAt: 1
+        }
+      }
+    );
+
+    const students = await Student.aggregate(pipeline);
+
+    const result = students.map(s => ({
+      id: s._id.toString(),
+      fullName: s.fullName,
+      email: s.email,
+      subscriptionTier: s.subscriptionTier,
+      isHired: s.isHired,
+      hasResume: s.hasResume,
+      hasVideo: s.hasVideo,
+      totalApplications: s.totalApplications,
+      activeApplications: s.activeApplications,
+      createdAt: s.createdAt
+    }));
+
+    res.json({
+      students: result,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum)
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
 exports.getStudentProfile = async (req, res) => {
   try {
     const { studentId } = req.params;
@@ -779,9 +1014,14 @@ exports.getStudentProfile = async (req, res) => {
       return res.status(400).json({ error: 'Invalid student ID format' });
     }
 
-    const student = await Student.findById(studentId).select(
-      'fullName email profileLink bio location availableFrom skills education experience resumeUrl introVideoUrl isHired createdAt'
-    );
+    const student = await Student.findById(studentId)
+      .populate({
+        path: 'currentSubscriptionId',
+        populate: {
+          path: 'serviceId',
+          select: 'name description price billingCycle features'
+        }
+      });
 
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
@@ -792,6 +1032,29 @@ exports.getStudentProfile = async (req, res) => {
       student.resumeUrl ? getPresignedUrl(student.resumeUrl) : null,
       student.introVideoUrl ? getPresignedUrl(student.introVideoUrl) : null
     ]);
+
+    // Get payment history
+    const payments = await PaymentRecord.find({ studentId: student._id })
+      .populate({
+        path: 'subscriptionId',
+        populate: {
+          path: 'serviceId',
+          select: 'name price'
+        }
+      })
+      .sort({ paymentDate: -1 });
+
+    // Get all applications with job details
+    const applications = await Application.find({ studentId: student._id })
+      .populate({
+        path: 'jobPostingId',
+        select: 'title location jobType salaryRange status',
+        populate: {
+          path: 'companyId',
+          select: 'name'
+        }
+      })
+      .sort({ createdAt: -1 });
 
     res.json({
       id: student._id,
@@ -807,7 +1070,583 @@ exports.getStudentProfile = async (req, res) => {
       resumeUrl,
       introVideoUrl,
       isHired: student.isHired,
-      createdAt: student.createdAt
+      createdAt: student.createdAt,
+      subscription: {
+        tier: student.subscriptionTier,
+        current: student.currentSubscriptionId ? {
+          id: student.currentSubscriptionId._id,
+          status: student.currentSubscriptionId.status,
+          startDate: student.currentSubscriptionId.startDate,
+          endDate: student.currentSubscriptionId.endDate,
+          autoRenew: student.currentSubscriptionId.autoRenew,
+          plan: student.currentSubscriptionId.serviceId ? {
+            id: student.currentSubscriptionId.serviceId._id,
+            name: student.currentSubscriptionId.serviceId.name,
+            description: student.currentSubscriptionId.serviceId.description,
+            price: student.currentSubscriptionId.serviceId.price,
+            billingCycle: student.currentSubscriptionId.serviceId.billingCycle,
+            features: student.currentSubscriptionId.serviceId.features
+          } : null
+        } : null
+      },
+      payments: payments.map(p => ({
+        id: p._id,
+        amount: p.amount,
+        currency: p.currency,
+        status: p.status,
+        paymentDate: p.paymentDate,
+        paymentMethod: p.paymentMethod,
+        transactionId: p.transactionId,
+        plan: p.subscriptionId?.serviceId ? {
+          name: p.subscriptionId.serviceId.name,
+          price: p.subscriptionId.serviceId.price
+        } : null
+      })),
+      applications: applications.map(app => ({
+        id: app._id,
+        status: app.status,
+        createdAt: app.createdAt,
+        reviewedAt: app.reviewedAt,
+        rejectionReason: app.rejectionReason,
+        job: app.jobPostingId ? {
+          id: app.jobPostingId._id,
+          title: app.jobPostingId.title,
+          location: app.jobPostingId.location,
+          jobType: app.jobPostingId.jobType,
+          salaryRange: app.jobPostingId.salaryRange,
+          status: app.jobPostingId.status,
+          company: app.jobPostingId.companyId ? {
+            id: app.jobPostingId.companyId._id,
+            name: app.jobPostingId.companyId.name
+          } : null
+        } : null
+      }))
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.assignStudentSubscription = async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { serviceId, endDate, autoRenew = false } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(studentId)) {
+      return res.status(400).json({ error: 'Invalid student ID format' });
+    }
+
+    if (!serviceId || !mongoose.Types.ObjectId.isValid(serviceId)) {
+      return res.status(400).json({ error: 'Valid service ID is required' });
+    }
+
+    const student = await Student.findById(studentId);
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    const service = await AvailableService.findById(serviceId);
+
+    if (!service) {
+      return res.status(404).json({ error: 'Subscription plan not found' });
+    }
+
+    // Cancel current subscription if exists and is not free
+    if (student.currentSubscriptionId) {
+      const currentSub = await ActiveSubscription.findById(student.currentSubscriptionId)
+        .populate('serviceId', 'tier');
+
+      if (currentSub && currentSub.serviceId?.tier !== 'free') {
+        await ActiveSubscription.updateOne(
+          { _id: student.currentSubscriptionId },
+          { $set: { status: 'cancelled', autoRenew: false } }
+        );
+      }
+    }
+
+    // Calculate end date based on billing cycle
+    const now = new Date();
+    let calculatedEndDate;
+
+    if (endDate) {
+      calculatedEndDate = new Date(endDate);
+    } else {
+      switch (service.billingCycle) {
+        case 'one-time':
+          calculatedEndDate = new Date('2099-12-31');
+          break;
+        case 'yearly':
+          calculatedEndDate = new Date(now);
+          calculatedEndDate.setFullYear(calculatedEndDate.getFullYear() + 1);
+          break;
+        case 'quarterly':
+          calculatedEndDate = new Date(now);
+          calculatedEndDate.setMonth(calculatedEndDate.getMonth() + 3);
+          break;
+        case 'monthly':
+        default:
+          calculatedEndDate = new Date(now);
+          calculatedEndDate.setMonth(calculatedEndDate.getMonth() + 1);
+          break;
+      }
+    }
+
+    // Create new subscription
+    const subscription = await ActiveSubscription.create({
+      studentId: student._id,
+      serviceId: service._id,
+      startDate: now,
+      endDate: calculatedEndDate,
+      status: 'active',
+      autoRenew: service.billingCycle === 'one-time' ? false : Boolean(autoRenew)
+    });
+
+    // Update student
+    await Student.updateOne(
+      { _id: student._id },
+      {
+        $set: {
+          currentSubscriptionId: subscription._id,
+          subscriptionTier: service.tier
+        }
+      }
+    );
+
+    const populatedSubscription = await ActiveSubscription.findById(subscription._id)
+      .populate('serviceId', 'name description price billingCycle features tier');
+
+    res.json({
+      success: true,
+      message: `Student assigned to ${service.name} plan`,
+      subscription: {
+        id: populatedSubscription._id,
+        status: populatedSubscription.status,
+        startDate: populatedSubscription.startDate,
+        endDate: populatedSubscription.endDate,
+        autoRenew: populatedSubscription.autoRenew,
+        plan: {
+          id: populatedSubscription.serviceId._id,
+          name: populatedSubscription.serviceId.name,
+          description: populatedSubscription.serviceId.description,
+          price: populatedSubscription.serviceId.price,
+          billingCycle: populatedSubscription.serviceId.billingCycle,
+          tier: populatedSubscription.serviceId.tier
+        }
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// ─── Subscription Plan Management ────────────────────────────────────────────
+
+exports.getSubscriptionPlans = async (req, res) => {
+  try {
+    const { includeInactive = 'true' } = req.query;
+
+    const filter = includeInactive === 'true' ? {} : { isActive: true };
+    const plans = await AvailableService.find(filter).sort({ displayOrder: 1, createdAt: -1 });
+
+    res.json({
+      plans: plans.map(plan => ({
+        id: plan._id,
+        name: plan.name,
+        description: plan.description,
+        maxApplications: plan.maxApplications,
+        price: plan.price,
+        currency: plan.currency,
+        billingCycle: plan.billingCycle,
+        trialDays: plan.trialDays,
+        discount: plan.discount,
+        features: plan.features,
+        badge: plan.badge,
+        displayOrder: plan.displayOrder,
+        resumeDownloadsPerMonth: plan.resumeDownloadsPerMonth,
+        videoViewsPerMonth: plan.videoViewsPerMonth,
+        prioritySupport: plan.prioritySupport,
+        profileBoost: plan.profileBoost,
+        applicationHighlight: plan.applicationHighlight,
+        isActive: plan.isActive,
+        createdAt: plan.createdAt,
+        updatedAt: plan.updatedAt
+      }))
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.getSubscriptionPlan = async (req, res) => {
+  try {
+    const { planId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(planId)) {
+      return res.status(400).json({ error: 'Invalid plan ID format' });
+    }
+
+    const plan = await AvailableService.findById(planId);
+
+    if (!plan) {
+      return res.status(404).json({ error: 'Subscription plan not found' });
+    }
+
+    res.json({
+      id: plan._id,
+      name: plan.name,
+      description: plan.description,
+      maxApplications: plan.maxApplications,
+      price: plan.price,
+      currency: plan.currency,
+      billingCycle: plan.billingCycle,
+      trialDays: plan.trialDays,
+      discount: plan.discount,
+      features: plan.features,
+      badge: plan.badge,
+      displayOrder: plan.displayOrder,
+      resumeDownloadsPerMonth: plan.resumeDownloadsPerMonth,
+      videoViewsPerMonth: plan.videoViewsPerMonth,
+      prioritySupport: plan.prioritySupport,
+      profileBoost: plan.profileBoost,
+      applicationHighlight: plan.applicationHighlight,
+      isActive: plan.isActive,
+      createdAt: plan.createdAt,
+      updatedAt: plan.updatedAt
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.createSubscriptionPlan = async (req, res) => {
+  try {
+    const {
+      name,
+      description,
+      maxApplications,
+      price,
+      currency,
+      billingCycle,
+      trialDays,
+      discount,
+      features,
+      badge,
+      displayOrder,
+      resumeDownloadsPerMonth,
+      videoViewsPerMonth,
+      prioritySupport,
+      profileBoost,
+      applicationHighlight,
+      isActive
+    } = req.body;
+
+    if (!name || name.trim().length < 2) {
+      return res.status(400).json({ error: 'Name must be at least 2 characters' });
+    }
+
+    if (!description || description.trim().length < 10) {
+      return res.status(400).json({ error: 'Description must be at least 10 characters' });
+    }
+
+    if (price === undefined || price < 0) {
+      return res.status(400).json({ error: 'Price must be a non-negative number' });
+    }
+
+    if (currency && !CURRENCIES.includes(currency)) {
+      return res.status(400).json({ error: `Currency must be one of: ${CURRENCIES.join(', ')}` });
+    }
+
+    if (billingCycle && !BILLING_CYCLES.includes(billingCycle)) {
+      return res.status(400).json({ error: `Billing cycle must be one of: ${BILLING_CYCLES.join(', ')}` });
+    }
+
+    const plan = await AvailableService.create({
+      name: name.trim(),
+      description: description.trim(),
+      maxApplications: maxApplications || null,
+      price,
+      currency: currency || 'USD',
+      billingCycle: billingCycle || 'monthly',
+      trialDays: trialDays || 0,
+      discount: discount || 0,
+      features: features || [],
+      badge: badge?.trim() || null,
+      displayOrder: displayOrder || 0,
+      resumeDownloadsPerMonth: resumeDownloadsPerMonth || null,
+      videoViewsPerMonth: videoViewsPerMonth || null,
+      prioritySupport: prioritySupport || false,
+      profileBoost: profileBoost || false,
+      applicationHighlight: applicationHighlight || false,
+      isActive: isActive !== false
+    });
+
+    res.status(201).json({
+      id: plan._id,
+      name: plan.name,
+      description: plan.description,
+      maxApplications: plan.maxApplications,
+      price: plan.price,
+      currency: plan.currency,
+      billingCycle: plan.billingCycle,
+      trialDays: plan.trialDays,
+      discount: plan.discount,
+      features: plan.features,
+      badge: plan.badge,
+      displayOrder: plan.displayOrder,
+      resumeDownloadsPerMonth: plan.resumeDownloadsPerMonth,
+      videoViewsPerMonth: plan.videoViewsPerMonth,
+      prioritySupport: plan.prioritySupport,
+      profileBoost: plan.profileBoost,
+      applicationHighlight: plan.applicationHighlight,
+      isActive: plan.isActive,
+      createdAt: plan.createdAt
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.updateSubscriptionPlan = async (req, res) => {
+  try {
+    const { planId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(planId)) {
+      return res.status(400).json({ error: 'Invalid plan ID format' });
+    }
+
+    const plan = await AvailableService.findById(planId);
+
+    if (!plan) {
+      return res.status(404).json({ error: 'Subscription plan not found' });
+    }
+
+    const {
+      name,
+      description,
+      maxApplications,
+      price,
+      currency,
+      billingCycle,
+      trialDays,
+      discount,
+      features,
+      badge,
+      displayOrder,
+      resumeDownloadsPerMonth,
+      videoViewsPerMonth,
+      prioritySupport,
+      profileBoost,
+      applicationHighlight,
+      isActive
+    } = req.body;
+
+    if (name !== undefined) {
+      if (name.trim().length < 2) {
+        return res.status(400).json({ error: 'Name must be at least 2 characters' });
+      }
+      plan.name = name.trim();
+    }
+
+    if (description !== undefined) {
+      if (description.trim().length < 10) {
+        return res.status(400).json({ error: 'Description must be at least 10 characters' });
+      }
+      plan.description = description.trim();
+    }
+
+    if (price !== undefined) {
+      if (price < 0) {
+        return res.status(400).json({ error: 'Price must be a non-negative number' });
+      }
+      plan.price = price;
+    }
+
+    if (currency !== undefined) {
+      if (!CURRENCIES.includes(currency)) {
+        return res.status(400).json({ error: `Currency must be one of: ${CURRENCIES.join(', ')}` });
+      }
+      plan.currency = currency;
+    }
+
+    if (billingCycle !== undefined) {
+      if (!BILLING_CYCLES.includes(billingCycle)) {
+        return res.status(400).json({ error: `Billing cycle must be one of: ${BILLING_CYCLES.join(', ')}` });
+      }
+      plan.billingCycle = billingCycle;
+    }
+
+    if (maxApplications !== undefined) plan.maxApplications = maxApplications || null;
+    if (trialDays !== undefined) plan.trialDays = trialDays;
+    if (discount !== undefined) plan.discount = discount;
+    if (features !== undefined) plan.features = features;
+    if (badge !== undefined) plan.badge = badge?.trim() || null;
+    if (displayOrder !== undefined) plan.displayOrder = displayOrder;
+    if (resumeDownloadsPerMonth !== undefined) plan.resumeDownloadsPerMonth = resumeDownloadsPerMonth || null;
+    if (videoViewsPerMonth !== undefined) plan.videoViewsPerMonth = videoViewsPerMonth || null;
+    if (prioritySupport !== undefined) plan.prioritySupport = prioritySupport;
+    if (profileBoost !== undefined) plan.profileBoost = profileBoost;
+    if (applicationHighlight !== undefined) plan.applicationHighlight = applicationHighlight;
+    if (isActive !== undefined) plan.isActive = isActive;
+
+    await plan.save();
+
+    res.json({
+      id: plan._id,
+      name: plan.name,
+      description: plan.description,
+      maxApplications: plan.maxApplications,
+      price: plan.price,
+      currency: plan.currency,
+      billingCycle: plan.billingCycle,
+      trialDays: plan.trialDays,
+      discount: plan.discount,
+      features: plan.features,
+      badge: plan.badge,
+      displayOrder: plan.displayOrder,
+      resumeDownloadsPerMonth: plan.resumeDownloadsPerMonth,
+      videoViewsPerMonth: plan.videoViewsPerMonth,
+      prioritySupport: plan.prioritySupport,
+      profileBoost: plan.profileBoost,
+      applicationHighlight: plan.applicationHighlight,
+      isActive: plan.isActive,
+      createdAt: plan.createdAt,
+      updatedAt: plan.updatedAt
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.deleteSubscriptionPlan = async (req, res) => {
+  try {
+    const { planId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(planId)) {
+      return res.status(400).json({ error: 'Invalid plan ID format' });
+    }
+
+    const plan = await AvailableService.findById(planId);
+
+    if (!plan) {
+      return res.status(404).json({ error: 'Subscription plan not found' });
+    }
+
+    // Soft delete by setting isActive to false
+    plan.isActive = false;
+    await plan.save();
+
+    res.json({ success: true, message: 'Subscription plan deactivated' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// ─── Free Tier Configuration ─────────────────────────────────────────────────
+
+exports.getFreeTierConfig = async (req, res) => {
+  try {
+    const [maxApplications, features, resumeDownloads, videoViews] = await Promise.all([
+      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_MAX_APPLICATIONS, 2),
+      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_FEATURES, []),
+      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_RESUME_DOWNLOADS, null),
+      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_VIDEO_VIEWS, null)
+    ]);
+
+    res.json({
+      maxApplications,
+      features,
+      resumeDownloadsPerMonth: resumeDownloads,
+      videoViewsPerMonth: videoViews
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.updateFreeTierConfig = async (req, res) => {
+  try {
+    const { maxApplications, features, resumeDownloadsPerMonth, videoViewsPerMonth } = req.body;
+
+    const updates = [];
+
+    if (maxApplications !== undefined) {
+      if (maxApplications !== null && (maxApplications < 0 || !Number.isInteger(maxApplications))) {
+        return res.status(400).json({ error: 'Max applications must be a non-negative integer or null for unlimited' });
+      }
+      updates.push(
+        SystemConfig.setValue(
+          CONFIG_KEYS.FREE_TIER_MAX_APPLICATIONS,
+          maxApplications,
+          'Maximum applications allowed for free tier',
+          req.user.userId
+        )
+      );
+    }
+
+    if (features !== undefined) {
+      if (!Array.isArray(features)) {
+        return res.status(400).json({ error: 'Features must be an array' });
+      }
+      updates.push(
+        SystemConfig.setValue(
+          CONFIG_KEYS.FREE_TIER_FEATURES,
+          features,
+          'Features available for free tier',
+          req.user.userId
+        )
+      );
+    }
+
+    if (resumeDownloadsPerMonth !== undefined) {
+      updates.push(
+        SystemConfig.setValue(
+          CONFIG_KEYS.FREE_TIER_RESUME_DOWNLOADS,
+          resumeDownloadsPerMonth,
+          'Resume downloads per month for free tier',
+          req.user.userId
+        )
+      );
+    }
+
+    if (videoViewsPerMonth !== undefined) {
+      updates.push(
+        SystemConfig.setValue(
+          CONFIG_KEYS.FREE_TIER_VIDEO_VIEWS,
+          videoViewsPerMonth,
+          'Video views per month for free tier',
+          req.user.userId
+        )
+      );
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    await Promise.all(updates);
+
+    // Return updated config
+    const [updatedMaxApps, updatedFeatures, updatedResumeDownloads, updatedVideoViews] = await Promise.all([
+      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_MAX_APPLICATIONS, 2),
+      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_FEATURES, []),
+      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_RESUME_DOWNLOADS, null),
+      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_VIDEO_VIEWS, null)
+    ]);
+
+    res.json({
+      maxApplications: updatedMaxApps,
+      features: updatedFeatures,
+      resumeDownloadsPerMonth: updatedResumeDownloads,
+      videoViewsPerMonth: updatedVideoViews
     });
   } catch (error) {
     console.error(error);

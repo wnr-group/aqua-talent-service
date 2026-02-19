@@ -305,14 +305,13 @@ exports.updateJob = async (req, res) => {
     }
 
     // Handle republish request via generic update endpoint
-    if (req.body.status === 'pending' && job.status === 'unpublished') {
+    if ((req.body.status === 'approved' || req.body.status === 'pending') && job.status === 'unpublished') {
       const updatedJob = await JobPosting.findByIdAndUpdate(
         jobId,
         {
           $set: {
-            status: 'pending',
-            approvedAt: null,
-            rejectionReason: null
+            status: 'approved',
+            approvedAt: new Date()
           }
         },
         { returnDocument: 'after' }
@@ -473,9 +472,8 @@ exports.republishJob = async (req, res) => {
       jobId,
       {
         $set: {
-          status: 'pending',
-          approvedAt: null,
-          rejectionReason: null
+          status: 'approved',
+          approvedAt: new Date()
         }
       },
       { returnDocument: 'after' }

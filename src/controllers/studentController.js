@@ -249,19 +249,13 @@ exports.getJob = async (req, res) => {
       return res.status(400).json({ error: 'Invalid job ID format' });
     }
 
-    const job = await JobPosting.findOne({ _id: jobId, status: 'approved' })
-      .populate('companyId', 'name logo description industry size website socialLinks foundedYear')
-      .select('-rejectionReason -approvedAt -status');
-
-    if (!job) {
-      return res.status(404).json({ error: 'Job not found' });
-    }
-
     let hasApplied = false;
     let applicationStatus = null;
+    let student = null;
 
+    // Check if student has applied to this job
     if (req.user && req.user.userType === 'student') {
-      const student = await Student.findOne({ userId: req.user.userId });
+      student = await Student.findOne({ userId: req.user.userId });
       if (student) {
         const application = await Application.findOne({
           studentId: student._id,
@@ -275,6 +269,20 @@ exports.getJob = async (req, res) => {
       }
     }
 
+    // Build query - applied students can view any job, others only approved
+    const query = { _id: jobId };
+    if (!hasApplied) {
+      query.status = 'approved';
+    }
+
+    const job = await JobPosting.findOne(query)
+      .populate('companyId', 'name logo description industry size website socialLinks foundedYear')
+      .select('-rejectionReason -approvedAt');
+
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
     const jobObj = job.toObject();
 
     res.json({
@@ -286,6 +294,7 @@ exports.getJob = async (req, res) => {
       jobType: jobObj.jobType,
       salaryRange: jobObj.salaryRange,
       deadline: jobObj.deadline,
+      status: jobObj.status,
       createdAt: jobObj.createdAt,
       company: jobObj.companyId ? {
         id: jobObj.companyId._id,

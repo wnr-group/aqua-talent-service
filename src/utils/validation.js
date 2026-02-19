@@ -144,31 +144,40 @@ const currentYear = new Date().getFullYear();
 
 const nullableUrlSchema = z.union([
   z.string().url().max(500).trim(),
-  z.literal('')
+  z.literal(''),
+  z.null()
 ]).optional();
 
 const nullableEnum = (values) => z.union([
   z.enum(values),
-  z.literal('')
+  z.literal(''),
+  z.null()
 ]).optional();
+
+const nullableFoundedYear = z.union([
+  z.number().int(),
+  z.string().regex(/^\d{4}$/),
+  z.null()
+]).optional().refine(val => {
+  if (val === undefined || val === null) return true;
+  const numeric = typeof val === 'string' ? Number(val) : val;
+  if (Number.isNaN(numeric)) return false;
+  return numeric >= 1800 && numeric <= currentYear;
+}, { message: `Founded year must be between 1800 and ${currentYear}` });
 
 const companyProfileSchema = z.object({
   name: z.string().min(2).max(100).trim().optional(),
-  description: z.string().max(2000).optional(),
+  description: z.string().max(2000).optional().nullable(),
   website: nullableUrlSchema,
   industry: nullableEnum(COMPANY_INDUSTRIES),
   size: nullableEnum(COMPANY_SIZES),
-  foundedYear: z.union([
-    z.number().int(),
-    z.string().regex(/^\d{4}$/)
-  ]).optional().refine(val => {
-    if (val === undefined) return true;
-    const numeric = typeof val === 'string' ? Number(val) : val;
-    if (Number.isNaN(numeric)) return false;
-    return numeric >= 1800 && numeric <= currentYear;
-  }, { message: `Founded year must be between 1800 and ${currentYear}` }),
+  foundedYear: nullableFoundedYear,
   linkedin: nullableUrlSchema,
-  twitter: nullableUrlSchema
+  twitter: nullableUrlSchema,
+  socialLinks: z.object({
+    linkedin: nullableUrlSchema,
+    twitter: nullableUrlSchema
+  }).optional()
 });
 
 module.exports = {

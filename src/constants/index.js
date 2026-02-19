@@ -38,6 +38,17 @@ const COMPANY_SIZES = [
   '1000+'
 ];
 
+const CONFIG_KEYS = {
+  FREE_TIER_MAX_APPLICATIONS: 'free_tier_max_applications',
+  FREE_TIER_FEATURES: 'free_tier_features',
+  FREE_TIER_RESUME_DOWNLOADS: 'free_tier_resume_downloads',
+  FREE_TIER_VIDEO_VIEWS: 'free_tier_video_views'
+};
+
+const CURRENCIES = ['USD', 'EUR', 'GBP', 'INR', 'AUD', 'CAD'];
+
+const BILLING_CYCLES = ['monthly', 'quarterly', 'yearly', 'one-time'];
+
 module.exports = {
   JOB_STATUSES,
   APPLICATION_STATUSES,
@@ -46,5 +57,8 @@ module.exports = {
   SUBSCRIPTION_STATUSES,
   SUBSCRIPTION_TIERS,
   COMPANY_INDUSTRIES,
-  COMPANY_SIZES
+  COMPANY_SIZES,
+  CONFIG_KEYS,
+  CURRENCIES,
+  BILLING_CYCLES
 };

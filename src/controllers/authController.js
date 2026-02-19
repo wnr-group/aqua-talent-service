@@ -5,6 +5,8 @@ const bcrypt = require('bcrypt');
 const User = require('../models/User');
 const Company = require('../models/Company');
 const Student = require('../models/Student');
+const AvailableService = require('../models/AvailableService');
+const ActiveSubscription = require('../models/ActiveSubscription');
 const { companyRegistrationSchema } = require('../utils/validation');
 const { studentRegistrationSchema } = require('../utils/validation');
 
@@ -251,36 +253,47 @@ exports.registerStudent = async (req, res) => {
 
  
 
-    try {
-      const user = await User.create({
-        username,
-        passwordHash,
-        userType: 'student'
-      });
+    const user = await User.create({
+      username,
+      passwordHash,
+      userType: 'student'
+    });
 
-      await Student.create({
-        userId: user._id,
-        fullName,
-        email,
-        profileLink: profileLink || null,
-        isHired: false
-      });
+    // Get or create the free plan
+    const freePlan = await AvailableService.getFreePlan();
 
-     
+    // Create student first (without subscription)
+    const student = await Student.create({
+      userId: user._id,
+      fullName,
+      email,
+      profileLink: profileLink || null,
+      isHired: false,
+      subscriptionTier: 'free'
+    });
 
-      res.status(201).json({ success: true });
+    // Create free subscription with student ID
+    const freeSubscription = await ActiveSubscription.create({
+      studentId: student._id,
+      serviceId: freePlan._id,
+      startDate: new Date(),
+      endDate: new Date('2099-12-31'),
+      status: 'active',
+      autoRenew: false
+    });
 
-    } catch (error) {
-    
-      throw error;
-    } finally {
-      
-    }
+    // Update student with subscription ID
+    await Student.findByIdAndUpdate(student._id, {
+      currentSubscriptionId: freeSubscription._id
+    });
+
+    res.status(201).json({ success: true });
 
   } catch (error) {
     if (error.name === 'ZodError') {
-      return res.status(400).json({ error: error.errors.message });
+      return res.status(400).json({ error: error.issues?.[0]?.message || 'Invalid input' });
     }
+    console.error('Student registration error:', error);
     res.status(500).json({ error: 'Registration failed. Please try again.' });
   }
 };

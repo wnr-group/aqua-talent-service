@@ -1,13 +1,22 @@
 const Student = require('../models/Student');
 const ActiveSubscription = require('../models/ActiveSubscription');
+const SystemConfig = require('../models/SystemConfig');
+const { CONFIG_KEYS } = require('../constants');
 
-const FREE_TIER_MAX_APPLICATIONS = 2;
+const DEFAULT_FREE_TIER_MAX_APPLICATIONS = 2;
 const SUBSCRIPTION_GRACE_PERIOD_DAYS = 3;
 
 const toGracePeriodEnd = (endDate) => {
   const graceEndDate = new Date(endDate);
   graceEndDate.setDate(graceEndDate.getDate() + SUBSCRIPTION_GRACE_PERIOD_DAYS);
   return graceEndDate;
+};
+
+const getFreeTierMaxApplications = async () => {
+  return SystemConfig.getValue(
+    CONFIG_KEYS.FREE_TIER_MAX_APPLICATIONS,
+    DEFAULT_FREE_TIER_MAX_APPLICATIONS
+  );
 };
 
 const checkSubscriptionStatus = async (studentId) => {
@@ -24,7 +33,7 @@ const checkSubscriptionStatus = async (studentId) => {
   }
 
   const subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
-    .populate('serviceId', 'name description maxApplications price features isActive');
+    .populate('serviceId', 'name tier description maxApplications price currency billingCycle trialDays discount features badge displayOrder prioritySupport profileBoost applicationHighlight isActive');
 
   if (!subscription) {
     await Student.findByIdAndUpdate(studentId, {
@@ -79,8 +88,20 @@ const checkSubscriptionStatus = async (studentId) => {
 const getApplicationLimit = async (studentId) => {
   const student = await Student.findById(studentId);
 
-  if (student?.subscriptionTier === 'paid') return Infinity;
-  return FREE_TIER_MAX_APPLICATIONS;
+  if (student?.subscriptionTier === 'paid') {
+    // Check if paid subscription has a limit
+    if (student.currentSubscriptionId) {
+      const subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
+        .populate('serviceId', 'maxApplications');
+
+      if (subscription?.serviceId?.maxApplications) {
+        return subscription.serviceId.maxApplications;
+      }
+    }
+    return Infinity;
+  }
+
+  return getFreeTierMaxApplications();
 };
 
 const isSubscriptionActive = async (studentId) => {
@@ -92,6 +113,6 @@ module.exports = {
   checkSubscriptionStatus,
   getApplicationLimit,
   isSubscriptionActive,
-  FREE_TIER_MAX_APPLICATIONS,
+  getFreeTierMaxApplications,
   SUBSCRIPTION_GRACE_PERIOD_DAYS
 };

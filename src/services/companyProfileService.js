@@ -71,14 +71,15 @@ const applyCompanyProfileUpdates = (company, payload, options = {}) => {
     company.socialLinks = {};
   }
 
-  const linkedin = normalizeNullable(payload.linkedin);
+  // Support both top-level and nested socialLinks structure
+  const linkedin = normalizeNullable(payload.linkedin ?? payload.socialLinks?.linkedin);
   let socialLinksModified = false;
   if (linkedin !== undefined) {
     company.socialLinks.linkedin = linkedin;
     socialLinksModified = true;
   }
 
-  const twitter = normalizeNullable(payload.twitter);
+  const twitter = normalizeNullable(payload.twitter ?? payload.socialLinks?.twitter);
   if (twitter !== undefined) {
     company.socialLinks.twitter = twitter;
     socialLinksModified = true;

@@ -1,10 +1,12 @@
 const mongoose = require('mongoose');
 
 const Student = require('../models/Student');
+const Application = require('../models/Application');
 const AvailableService = require('../models/AvailableService');
 const ActiveSubscription = require('../models/ActiveSubscription');
 const PaymentRecord = require('../models/PaymentRecord');
-const { checkSubscriptionStatus } = require('../services/subscriptionService');
+const { checkSubscriptionStatus, getApplicationLimit } = require('../services/subscriptionService');
+const { getActiveApplicationCount } = require('../services/applicationService');
 
 const generateTransactionId = () => `txn_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 const DEFAULT_PRO_PLAN_NAME = process.env.PRO_PLAN_NAME?.trim() || 'Pro Plan';
@@ -51,8 +53,8 @@ const findDefaultProPlan = async (planKey = 'pro') => {
 exports.getAvailableServices = async (req, res) => {
   try {
     const services = await AvailableService.find({ isActive: true })
-      .select('name description maxApplications price features isActive')
-      .sort({ price: 1, createdAt: 1 });
+      .select('name tier description maxApplications price currency billingCycle trialDays discount features badge displayOrder prioritySupport profileBoost applicationHighlight')
+      .sort({ displayOrder: 1, price: 1 });
 
     res.json({ services });
   } catch (error) {
@@ -69,6 +71,12 @@ exports.getCurrentSubscription = async (req, res) => {
       return res.status(404).json({ error: 'Student not found' });
     }
 
+    // Get application limit and usage
+    const applicationLimit = await getApplicationLimit(student._id);
+
+    // Count active applications (excluding withdrawn/rejected) - lifetime count for free tier
+    const applicationsUsed = await getActiveApplicationCount(student._id);
+
     const subscriptionState = await checkSubscriptionStatus(student._id);
 
     if (!subscriptionState.subscription) {
@@ -77,7 +85,10 @@ exports.getCurrentSubscription = async (req, res) => {
         currentSubscription: null,
         status: 'free',
         isActive: true,
-        inGracePeriod: false
+        inGracePeriod: false,
+        applicationLimit: applicationLimit === Infinity ? null : applicationLimit,
+        applicationsUsed,
+        applicationsRemaining: applicationLimit === Infinity ? null : Math.max(0, applicationLimit - applicationsUsed)
       });
     }
 
@@ -95,11 +106,33 @@ exports.getCurrentSubscription = async (req, res) => {
         endDate: subscription.endDate,
         status: subscription.status,
         autoRenew: subscription.autoRenew
-      }
+      },
+      applicationLimit: applicationLimit === Infinity ? null : applicationLimit,
+      applicationsUsed,
+      applicationsRemaining: applicationLimit === Infinity ? null : Math.max(0, applicationLimit - applicationsUsed)
     });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
+  }
+};
+
+const calculateEndDate = (billingCycle, startDate = new Date()) => {
+  const end = new Date(startDate);
+
+  switch (billingCycle) {
+    case 'one-time':
+      return new Date('2099-12-31'); // Never expires
+    case 'yearly':
+      end.setFullYear(end.getFullYear() + 1);
+      return end;
+    case 'quarterly':
+      end.setMonth(end.getMonth() + 3);
+      return end;
+    case 'monthly':
+    default:
+      end.setMonth(end.getMonth() + 1);
+      return end;
   }
 };
 
@@ -108,7 +141,6 @@ exports.createOrUpgradeSubscription = async (req, res) => {
     const {
       serviceId,
       planKey = 'pro',
-      durationDays = 30,
       autoRenew = false,
       paymentMethod = 'manual',
       currency = 'USD',
@@ -117,12 +149,6 @@ exports.createOrUpgradeSubscription = async (req, res) => {
 
     if (serviceId && !mongoose.Types.ObjectId.isValid(serviceId)) {
       return res.status(400).json({ error: 'Invalid service ID format' });
-    }
-
-    const duration = parseInt(durationDays);
-
-    if (Number.isNaN(duration) || duration < 1 || duration > 365) {
-      return res.status(400).json({ error: 'durationDays must be between 1 and 365' });
     }
 
     const student = await Student.findOne({ userId: req.user.userId });
@@ -143,15 +169,29 @@ exports.createOrUpgradeSubscription = async (req, res) => {
       return res.status(404).json({ error: 'Subscription service not found. Please configure the Pro plan or provide a valid serviceId.' });
     }
 
+    // Prevent subscribing to free tier via this endpoint
+    if (service.tier === 'free') {
+      return res.status(400).json({ error: 'Cannot subscribe to free tier through this endpoint' });
+    }
+
     const now = new Date();
-    const endDate = new Date(now);
-    endDate.setDate(endDate.getDate() + duration);
+    const endDate = calculateEndDate(service.billingCycle, now);
+
+    // One-time plans cannot auto-renew
+    const shouldAutoRenew = service.billingCycle === 'one-time' ? false : Boolean(autoRenew);
 
     if (student.currentSubscriptionId) {
-      await ActiveSubscription.updateOne(
-        { _id: student.currentSubscriptionId, studentId: student._id, status: { $in: ['active', 'pending'] } },
-        { $set: { status: 'cancelled', autoRenew: false } }
-      );
+      // Get current subscription to check if it's a free plan
+      const currentSub = await ActiveSubscription.findById(student.currentSubscriptionId)
+        .populate('serviceId', 'tier');
+
+      // Cancel current subscription if it's not a free tier
+      if (currentSub && currentSub.serviceId?.tier !== 'free') {
+        await ActiveSubscription.updateOne(
+          { _id: student.currentSubscriptionId, studentId: student._id, status: { $in: ['active', 'pending'] } },
+          { $set: { status: 'cancelled', autoRenew: false } }
+        );
+      }
     }
 
     const subscription = await ActiveSubscription.create({
@@ -160,7 +200,7 @@ exports.createOrUpgradeSubscription = async (req, res) => {
       startDate: now,
       endDate,
       status: 'active',
-      autoRenew: Boolean(autoRenew)
+      autoRenew: shouldAutoRenew
     });
 
     const paymentRecord = await PaymentRecord.create({
