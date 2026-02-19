@@ -1,14 +1,15 @@
 const crypto = require('crypto');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const AWS_REGION = process.env.AWS_REGION;
 const AWS_S3_BUCKET = process.env.AWS_S3_BUCKET;
-const AWS_S3_CUSTOM_DOMAIN = process.env.AWS_S3_CUSTOM_DOMAIN;
 
 let s3Client;
 
 const MAX_RESUME_BYTES = 5 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 30 * 1024 * 1024;
+const PRESIGNED_URL_EXPIRY = 3600; // 1 hour
 
 const getS3Client = () => {
   if (!AWS_REGION) {
@@ -44,18 +45,6 @@ const extensionFromMime = (mime) => {
   return mapping[mime] || 'png';
 };
 
-const buildPublicUrl = (key) => {
-  if (AWS_S3_CUSTOM_DOMAIN) {
-    return `https://${AWS_S3_CUSTOM_DOMAIN}/${key}`;
-  }
-
-  if (!AWS_REGION || AWS_REGION === 'us-east-1') {
-    return `https://${AWS_S3_BUCKET}.s3.amazonaws.com/${key}`;
-  }
-
-  return `https://${AWS_S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com/${key}`;
-};
-
 const assertBucketConfigured = () => {
   if (!AWS_S3_BUCKET) {
     throw new Error('AWS_S3_BUCKET is not configured');
@@ -65,6 +54,22 @@ const assertBucketConfigured = () => {
 const sanitizeFilename = (filename = 'video.mp4') => {
   const normalized = filename.trim() || 'video.mp4';
   return normalized.replace(/[^a-zA-Z0-9.\-_]/g, '-');
+};
+
+const getPresignedUrl = async (key) => {
+  if (!key) {
+    return null;
+  }
+
+  assertBucketConfigured();
+  const client = getS3Client();
+
+  const command = new GetObjectCommand({
+    Bucket: AWS_S3_BUCKET,
+    Key: key
+  });
+
+  return getSignedUrl(client, command, { expiresIn: PRESIGNED_URL_EXPIRY });
 };
 
 const uploadCompanyLogo = async (file) => {
@@ -85,7 +90,7 @@ const uploadCompanyLogo = async (file) => {
   });
 
   await client.send(command);
-  return buildPublicUrl(key);
+  return key;
 };
 
 const isPdfBuffer = (buffer) => {
@@ -125,7 +130,7 @@ const uploadStudentResume = async (file) => {
   });
 
   await client.send(command);
-  return buildPublicUrl(key);
+  return key;
 };
 
 const uploadStudentVideo = async (file, studentId) => {
@@ -159,11 +164,12 @@ const uploadStudentVideo = async (file, studentId) => {
   });
 
   await client.send(command);
-  return buildPublicUrl(key);
+  return key;
 };
 
 module.exports = {
   uploadCompanyLogo,
   uploadStudentResume,
-  uploadStudentVideo
+  uploadStudentVideo,
+  getPresignedUrl
 };

@@ -169,7 +169,7 @@ exports.createJob = async (req, res) => {
     res.status(201).json(job);
   } catch (error) {
     if (error.name === 'ZodError') {
-      return res.status(400).json({ error: error.errors[0].message });
+      return res.status(400).json({ error: error.issues[0].message });
     }
 
     console.error(error);
@@ -257,7 +257,7 @@ exports.updateJob = async (req, res) => {
     res.json(updatedJob);
   } catch (error) {
     if (error.name === 'ZodError') {
-      return res.status(400).json({ error: error.errors[0].message });
+      return res.status(400).json({ error: error.issues[0].message });
     }
 
     console.error(error);
@@ -514,7 +514,7 @@ exports.updateProfile = async (req, res) => {
     res.json({ profile: buildCompanyProfileResponse(company) });
   } catch (error) {
     if (error.name === 'ZodError') {
-      return res.status(400).json({ error: error.errors[0].message });
+      return res.status(400).json({ error: error.issues[0].message });
     }
 
     console.error(error);

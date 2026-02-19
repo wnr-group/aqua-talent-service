@@ -10,6 +10,7 @@ const adminRoutes = require('./routes/adminRoutes');
 const serviceRoutes = require('./routes/serviceRoutes');
 const publicCompanyRoutes = require('./routes/publicCompanyRoutes');
 const unsubscribeRoutes = require('./routes/unsubscribeRoutes');
+const mediaRoutes = require('./routes/mediaRoutes');
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim())
@@ -31,6 +32,7 @@ app.use('/api/student', studentRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/services', serviceRoutes);
 app.use('/api/companies', publicCompanyRoutes);
+app.use('/api/media', mediaRoutes);
 app.use('/', unsubscribeRoutes);
 
 import('./routes/testMailRoutes.mjs')

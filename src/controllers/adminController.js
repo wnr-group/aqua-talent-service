@@ -207,7 +207,7 @@ exports.updateCompany = async (req, res) => {
     }
   } catch (error) {
     if (error.name === 'ZodError') {
-      return res.status(400).json({ error: error.errors[0].message });
+      return res.status(400).json({ error: error.issues[0].message });
     }
 
     console.error(error);
@@ -370,7 +370,7 @@ exports.updateJob = async (req, res) => {
     });
   } catch (error) {
     if (error.name === 'ZodError') {
-      return res.status(400).json({ error: error.errors[0].message });
+      return res.status(400).json({ error: error.issues[0].message });
     }
 
     console.error(error);
@@ -725,7 +725,7 @@ exports.updateApplication = async (req, res) => {
     }
   } catch (error) {
     if (error.name === 'ZodError') {
-      return res.status(400).json({ error: error.errors[0].message });
+      return res.status(400).json({ error: error.issues[0].message });
     }
 
     console.error(error);
