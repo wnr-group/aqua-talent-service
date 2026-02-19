@@ -17,5 +17,6 @@ router.get('/jobs', adminController.getJobs);
 router.patch('/jobs/:jobId', adminController.updateJob);
 router.get('/applications', adminController.getApplications);
 router.patch('/applications/:appId', adminController.updateApplication);
+router.get('/students/:studentId', adminController.getStudentProfile);
 
 module.exports = router;

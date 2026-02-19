@@ -30,3 +30,25 @@ exports.uploadIntroVideo = async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 };
+
+exports.deleteIntroVideo = async (req, res) => {
+  try {
+    const student = await Student.findOne({ userId: req.user.userId });
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    if (!student.introVideoUrl) {
+      return res.status(400).json({ error: 'No intro video to delete' });
+    }
+
+    student.introVideoUrl = null;
+    await student.save();
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};

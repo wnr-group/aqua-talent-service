@@ -400,14 +400,7 @@ exports.applyToJob = async (req, res) => {
       })
       .catch((err) => console.error('Notification error (submitted):', err));
 
-    if (_companyUserId) {
-      notificationService
-        .notifyApplicationReceived(_companyUserId, {
-          jobTitle: _jobTitle,
-          studentName: student.fullName
-        })
-        .catch((err) => console.error('Notification error (received):', err));
-    }
+    // Company notification is sent after admin approval, not on submission
 
     emailService
       .sendApplicationStatusEmail(
@@ -527,8 +520,7 @@ exports.updateProfile = async (req, res) => {
       availableFrom,
       skills,
       education,
-      experience,
-      introVideoUrl
+      experience
     } = req.body || {};
 
     const student = await Student.findOne({ userId: req.user.userId });
@@ -694,18 +686,7 @@ exports.updateProfile = async (req, res) => {
       hasUpdates = true;
     }
 
-    if (introVideoUrl !== undefined) {
-      if (introVideoUrl && introVideoUrl.length > 500) {
-        return res.status(400).json({ error: 'Intro video link must be less than 500 characters' });
-      }
-
-      if (introVideoUrl && !isValidUrl(introVideoUrl)) {
-        return res.status(400).json({ error: 'Intro video link must be a valid URL' });
-      }
-
-      student.introVideoUrl = introVideoUrl ? introVideoUrl.trim() : null;
-      hasUpdates = true;
-    }
+    // Note: introVideoUrl can only be set via file upload endpoint
 
     if (!hasUpdates) {
       return res.status(400).json({ error: 'No fields to update' });

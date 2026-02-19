@@ -6,7 +6,7 @@ const Application = require('../models/Application');
 const Student = require('../models/Student');
 const { createJobSchema, createDraftJobSchema, updateJobSchema, companyProfileSchema } = require('../utils/validation');
 const { JOB_STATUSES, JOB_TYPES, APPLICATION_STATUSES } = require('../constants');
-const { uploadCompanyLogo } = require('../services/mediaService');
+const { uploadCompanyLogo, getPresignedUrl } = require('../services/mediaService');
 const emailService = require('../services/emailService');
 const notificationService = require('../services/notificationService');
 const {
@@ -944,6 +944,69 @@ exports.updateApplication = async (req, res) => {
         })
         .catch((err) => console.error('Notification error (hired):', err));
     }
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.getStudentProfile = async (req, res) => {
+  try {
+    const { studentId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(studentId)) {
+      return res.status(400).json({ error: 'Invalid student ID format' });
+    }
+
+    const company = await Company.findOne({ userId: req.user.userId });
+
+    if (!company) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
+    // Get all job IDs for this company
+    const companyJobIds = await JobPosting.find({ companyId: company._id }).distinct('_id');
+
+    // Check if student has an approved application for any of the company's jobs
+    const hasApprovedApplication = await Application.exists({
+      studentId,
+      jobPostingId: { $in: companyJobIds },
+      status: { $in: ['reviewed', 'hired'] }
+    });
+
+    if (!hasApprovedApplication) {
+      return res.status(403).json({ error: 'You can only view profiles of students with approved applications to your jobs' });
+    }
+
+    const student = await Student.findById(studentId).select(
+      'fullName email profileLink bio location availableFrom skills education experience resumeUrl introVideoUrl isHired'
+    );
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    // Generate presigned URLs for media files
+    const [resumeUrl, introVideoUrl] = await Promise.all([
+      student.resumeUrl ? getPresignedUrl(student.resumeUrl) : null,
+      student.introVideoUrl ? getPresignedUrl(student.introVideoUrl) : null
+    ]);
+
+    res.json({
+      id: student._id,
+      fullName: student.fullName,
+      email: student.email,
+      profileLink: student.profileLink || null,
+      bio: student.bio || null,
+      location: student.location || null,
+      availableFrom: student.availableFrom || null,
+      skills: student.skills || [],
+      education: student.education || [],
+      experience: student.experience || [],
+      resumeUrl,
+      introVideoUrl,
+      isHired: student.isHired
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });

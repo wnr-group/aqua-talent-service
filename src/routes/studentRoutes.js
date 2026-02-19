@@ -51,6 +51,7 @@ router.post(
 	},
 	studentMediaController.uploadIntroVideo
 );
+router.delete('/profile/video', requireAuth, requireUserType('student'), studentMediaController.deleteIntroVideo);
 router.get('/profile/completeness', requireAuth, requireUserType('student'), studentController.getProfileCompleteness);
 
 // Subscription endpoints (require student auth)

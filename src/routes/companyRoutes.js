@@ -33,5 +33,6 @@ router.patch('/jobs/:jobId/close', companyController.closeJob);
 router.get('/jobs/:jobId/applications', companyController.getJobApplications);
 router.get('/applications', companyController.getAllApplications);
 router.patch('/applications/:appId', companyController.updateApplication);
+router.get('/students/:studentId', companyController.getStudentProfile);
 
 module.exports = router;
