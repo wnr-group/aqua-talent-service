@@ -4,10 +4,125 @@ const Student = require('../models/Student');
 const JobPosting = require('../models/JobPosting');
 const Application = require('../models/Application');
 const { getApplicationLimit } = require('../services/subscriptionService');
+const { uploadStudentResume } = require('../services/mediaService');
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
+const isValidUrl = (value) => {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return false;
+  }
+
+  try {
+    new URL(value);
+    return true;
+  } catch (error) {
+    return false;
+  }
+};
+
+const sanitizeString = (value, maxLength) => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  return trimmed.slice(0, maxLength);
+};
+
+const normalizeYear = (value) => {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const year = Number(value);
+  const maxYear = new Date().getFullYear() + 6;
+  if (!Number.isInteger(year) || year < 1900 || year > maxYear) {
+    return null;
+  }
+
+  return year;
+};
+
+const normalizeDate = (value) => {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return date;
+};
+
+const buildProfileResponse = (student) => ({
+  fullName: student.fullName,
+  email: student.email,
+  profileLink: student.profileLink || '',
+  bio: student.bio || '',
+  location: student.location || '',
+  availableFrom: student.availableFrom,
+  skills: student.skills || [],
+  education: student.education || [],
+  experience: student.experience || [],
+  resumeUrl: student.resumeUrl || null,
+  introVideoUrl: student.introVideoUrl || '',
+  isHired: student.isHired
+});
+
+const buildCompleteness = (student) => {
+  const sections = [
+    {
+      label: 'Bio',
+      filled: Boolean(student.bio && student.bio.trim().length > 0)
+    },
+    {
+      label: 'Location',
+      filled: Boolean(student.location && student.location.trim().length > 0)
+    },
+    {
+      label: 'Skills',
+      filled: Array.isArray(student.skills) && student.skills.length > 0
+    },
+    {
+      label: 'Education',
+      filled: Array.isArray(student.education) && student.education.length > 0
+    },
+    {
+      label: 'Experience',
+      filled: Array.isArray(student.experience) && student.experience.length > 0
+    },
+    {
+      label: 'Resume',
+      filled: Boolean(student.resumeUrl)
+    },
+    {
+      label: 'Intro Video',
+      filled: Boolean(student.introVideoUrl)
+    },
+    {
+      label: 'Available From',
+      filled: Boolean(student.availableFrom)
+    }
+  ];
+
+  const totalSections = 8;
+  const completedSections = sections.filter((section) => section.filled).length;
+  const percentage = Math.round((completedSections / totalSections) * 100);
+  const missingItems = sections
+    .filter((section) => !section.filled)
+    .map((section) => section.label);
+
+  return { percentage, missingItems };
+};
 
 exports.getDashboard = async (req, res) => {
   try {
@@ -78,7 +193,7 @@ exports.getJobs = async (req, res) => {
 
     const [jobs, total] = await Promise.all([
       JobPosting.find(query)
-        .populate('companyId', 'name')
+        .populate('companyId', 'name logo industry size website')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNum)
@@ -100,7 +215,11 @@ exports.getJobs = async (req, res) => {
         createdAt: jobObj.createdAt,
         company: jobObj.companyId ? {
           id: jobObj.companyId._id,
-          name: jobObj.companyId.name
+          name: jobObj.companyId.name,
+          logo: jobObj.companyId.logo,
+          industry: jobObj.companyId.industry,
+          size: jobObj.companyId.size,
+          website: jobObj.companyId.website
         } : null
       };
     });
@@ -129,7 +248,7 @@ exports.getJob = async (req, res) => {
     }
 
     const job = await JobPosting.findOne({ _id: jobId, status: 'approved' })
-      .populate('companyId', 'name')
+      .populate('companyId', 'name logo description industry size website socialLinks foundedYear')
       .select('-rejectionReason -approvedAt -status');
 
     if (!job) {
@@ -168,7 +287,17 @@ exports.getJob = async (req, res) => {
       createdAt: jobObj.createdAt,
       company: jobObj.companyId ? {
         id: jobObj.companyId._id,
-        name: jobObj.companyId.name
+        name: jobObj.companyId.name,
+        logo: jobObj.companyId.logo,
+        description: jobObj.companyId.description,
+        industry: jobObj.companyId.industry,
+        size: jobObj.companyId.size,
+        website: jobObj.companyId.website,
+        socialLinks: {
+          linkedin: jobObj.companyId.socialLinks?.linkedin || null,
+          twitter: jobObj.companyId.socialLinks?.twitter || null
+        },
+        foundedYear: jobObj.companyId.foundedYear
       } : null,
       hasApplied,
       applicationStatus
@@ -237,7 +366,7 @@ exports.applyToJob = async (req, res) => {
             createdAt: new Date()
           }
         },
-        { new: true }
+        { returnDocument: 'after' }
       );
     } else {
       application = await Application.create({
@@ -334,18 +463,14 @@ exports.getProfile = async (req, res) => {
   try {
     const student = await Student.findOne(
       { userId: req.user.userId },
-      'fullName email profileLink'
+      'fullName email profileLink bio location availableFrom skills education experience resumeUrl introVideoUrl isHired'
     );
 
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    res.json({
-      fullName: student.fullName,
-      email: student.email,
-      profileLink: student.profileLink || ''
-    });
+    res.json(buildProfileResponse(student));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
@@ -354,51 +479,257 @@ exports.getProfile = async (req, res) => {
 
 exports.updateProfile = async (req, res) => {
   try {
-    const { fullName, email, profileLink } = req.body;
-    const updateFields = {};
+    const {
+      fullName,
+      email,
+      profileLink,
+      bio,
+      location,
+      availableFrom,
+      skills,
+      education,
+      experience,
+      introVideoUrl
+    } = req.body || {};
+
+    const student = await Student.findOne({ userId: req.user.userId });
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    let hasUpdates = false;
 
     if (fullName !== undefined) {
       if (typeof fullName !== 'string' || fullName.trim().length < 2 || fullName.trim().length > 100) {
         return res.status(400).json({ error: 'Full name must be 2-100 characters' });
       }
-      updateFields.fullName = fullName.trim();
+      student.fullName = fullName.trim();
+      hasUpdates = true;
     }
 
     if (email !== undefined) {
       if (!isValidEmail(email)) {
         return res.status(400).json({ error: 'Invalid email format' });
       }
-      updateFields.email = email.toLowerCase();
+      student.email = email.toLowerCase();
+      hasUpdates = true;
     }
 
     if (profileLink !== undefined) {
-      if (profileLink !== '') {
-        try {
-          new URL(profileLink);
-        } catch (e) {
-          return res.status(400).json({ error: 'Profile link must be a valid URL' });
-        }
-        if (profileLink.length > 500) {
-          return res.status(400).json({ error: 'Profile link must be less than 500 characters' });
-        }
+      if (profileLink && profileLink.length > 500) {
+        return res.status(400).json({ error: 'Profile link must be less than 500 characters' });
       }
-      updateFields.profileLink = profileLink || null;
+      if (profileLink && !isValidUrl(profileLink)) {
+        return res.status(400).json({ error: 'Profile link must be a valid URL' });
+      }
+      student.profileLink = profileLink ? profileLink.trim() : null;
+      hasUpdates = true;
     }
 
-    if (Object.keys(updateFields).length === 0) {
+    if (bio !== undefined) {
+      if (bio && (typeof bio !== 'string' || bio.length > 2000)) {
+        return res.status(400).json({ error: 'Bio must be a string up to 2000 characters' });
+      }
+      student.bio = bio ? bio.trim() : null;
+      hasUpdates = true;
+    }
+
+    if (location !== undefined) {
+      if (location && (typeof location !== 'string' || location.length > 200)) {
+        return res.status(400).json({ error: 'Location must be a string up to 200 characters' });
+      }
+      student.location = location ? location.trim() : null;
+      hasUpdates = true;
+    }
+
+    if (availableFrom !== undefined) {
+      if (availableFrom === null || availableFrom === '') {
+        student.availableFrom = null;
+      } else {
+        const parsedDate = normalizeDate(availableFrom);
+        if (!parsedDate) {
+          return res.status(400).json({ error: 'availableFrom must be a valid date' });
+        }
+        student.availableFrom = parsedDate;
+      }
+      hasUpdates = true;
+    }
+
+    if (skills !== undefined) {
+      if (!Array.isArray(skills)) {
+        return res.status(400).json({ error: 'Skills must be an array of strings' });
+      }
+      const normalizedSkills = Array.from(new Set(
+        skills
+          .map((skill) => (typeof skill === 'string' ? skill.trim() : ''))
+          .filter((skill) => skill)
+      ));
+
+      if (normalizedSkills.length > 50) {
+        return res.status(400).json({ error: 'Skills cannot exceed 50 entries' });
+      }
+
+      if (normalizedSkills.some((skill) => skill.length > 50)) {
+        return res.status(400).json({ error: 'Each skill must be 50 characters or fewer' });
+      }
+
+      student.skills = normalizedSkills;
+      hasUpdates = true;
+    }
+
+    if (education !== undefined) {
+      if (!Array.isArray(education)) {
+        return res.status(400).json({ error: 'Education must be an array' });
+      }
+
+      const normalizedEducation = education.map((entry, idx) => {
+        if (!entry || typeof entry !== 'object') {
+          throw new Error(`Education entry ${idx + 1} is invalid`);
+        }
+
+        const normalizedEntry = {
+          institution: sanitizeString(entry.institution, 200),
+          degree: sanitizeString(entry.degree, 200),
+          field: sanitizeString(entry.field, 200),
+          startYear: normalizeYear(entry.startYear),
+          endYear: normalizeYear(entry.endYear)
+        };
+
+        const providedStart = entry.startYear !== undefined && entry.startYear !== null && entry.startYear !== '';
+        const providedEnd = entry.endYear !== undefined && entry.endYear !== null && entry.endYear !== '';
+
+        if (providedStart && normalizedEntry.startYear === null) {
+          throw new Error('Education start year must be between 1900 and the near future');
+        }
+
+        if (providedEnd && normalizedEntry.endYear === null) {
+          throw new Error('Education end year must be between 1900 and the near future');
+        }
+
+        if (normalizedEntry.startYear && normalizedEntry.endYear && normalizedEntry.endYear < normalizedEntry.startYear) {
+          throw new Error('Education end year cannot be before start year');
+        }
+
+        return normalizedEntry;
+      }).filter((entry) => Object.values(entry).some((value) => value !== null));
+
+      student.education = normalizedEducation;
+      hasUpdates = true;
+    }
+
+    if (experience !== undefined) {
+      if (!Array.isArray(experience)) {
+        return res.status(400).json({ error: 'Experience must be an array' });
+      }
+
+      const normalizedExperience = experience.map((entry, idx) => {
+        if (!entry || typeof entry !== 'object') {
+          throw new Error(`Experience entry ${idx + 1} is invalid`);
+        }
+
+        const normalizedEntry = {
+          company: sanitizeString(entry.company, 200),
+          title: sanitizeString(entry.title, 200),
+          startDate: normalizeDate(entry.startDate),
+          endDate: normalizeDate(entry.endDate),
+          description: entry?.description ? entry.description.toString().slice(0, 2000) : null
+        };
+
+        if (entry.startDate && !normalizedEntry.startDate) {
+          throw new Error('Experience start date must be a valid date');
+        }
+
+        if (entry.endDate && !normalizedEntry.endDate) {
+          throw new Error('Experience end date must be a valid date');
+        }
+
+        if (normalizedEntry.endDate && normalizedEntry.startDate && normalizedEntry.endDate < normalizedEntry.startDate) {
+          throw new Error('Experience end date cannot be before start date');
+        }
+
+        return normalizedEntry;
+      }).filter((entry) => Object.values(entry).some((value) => value !== null));
+
+      student.experience = normalizedExperience;
+      hasUpdates = true;
+    }
+
+    if (introVideoUrl !== undefined) {
+      if (introVideoUrl && introVideoUrl.length > 500) {
+        return res.status(400).json({ error: 'Intro video link must be less than 500 characters' });
+      }
+
+      if (introVideoUrl && !isValidUrl(introVideoUrl)) {
+        return res.status(400).json({ error: 'Intro video link must be a valid URL' });
+      }
+
+      student.introVideoUrl = introVideoUrl ? introVideoUrl.trim() : null;
+      hasUpdates = true;
+    }
+
+    if (!hasUpdates) {
       return res.status(400).json({ error: 'No fields to update' });
     }
 
-    const result = await Student.updateOne(
-      { userId: req.user.userId },
-      { $set: updateFields }
-    );
+    await student.save();
 
-    if (result.matchedCount === 0) {
+    res.json({ success: true });
+  } catch (error) {
+    if (error.message && error.message.startsWith('Education')) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    if (error.message && error.message.startsWith('Experience')) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.uploadResume = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'Resume file is required' });
+    }
+
+    const student = await Student.findOne({ userId: req.user.userId });
+
+    if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    res.json({ success: true });
+    const resumeUrl = await uploadStudentResume(req.file);
+
+    student.resumeUrl = resumeUrl;
+    await student.save();
+
+    res.json({ resumeUrl });
+  } catch (error) {
+    const clientErrorIndicators = ['resume', 'pdf', 'file buffer'];
+
+    if (error.message && clientErrorIndicators.some((indicator) => error.message.toLowerCase().includes(indicator))) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.getProfileCompleteness = async (req, res) => {
+  try {
+    const student = await Student.findOne({ userId: req.user.userId });
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    const { percentage, missingItems } = buildCompleteness(student);
+
+    res.json({ percentage, missingItems });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });

@@ -8,6 +8,7 @@ const companyRoutes = require('./routes/companyRoutes');
 const studentRoutes = require('./routes/studentRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const serviceRoutes = require('./routes/serviceRoutes');
+const publicCompanyRoutes = require('./routes/publicCompanyRoutes');
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim())
@@ -28,6 +29,7 @@ app.use('/api/company', companyRoutes);
 app.use('/api/student', studentRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/services', serviceRoutes);
+app.use('/api/companies', publicCompanyRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

@@ -1,5 +1,11 @@
 const { z } = require('zod');
-const { JOB_TYPES, COMPANY_STATUSES, JOB_STATUSES } = require('../constants');
+const {
+  JOB_TYPES,
+  COMPANY_STATUSES,
+  JOB_STATUSES,
+  COMPANY_INDUSTRIES,
+  COMPANY_SIZES
+} = require('../constants');
 
 const companyRegistrationSchema = z.object({
   companyName: z.string()
@@ -102,6 +108,37 @@ const adminUpdateApplicationSchema = z.object({
   rejectionReason: z.string().trim().optional()
 });
 
+const currentYear = new Date().getFullYear();
+
+const nullableUrlSchema = z.union([
+  z.string().url().max(500).trim(),
+  z.literal('')
+]).optional();
+
+const nullableEnum = (values) => z.union([
+  z.enum(values),
+  z.literal('')
+]).optional();
+
+const companyProfileSchema = z.object({
+  name: z.string().min(2).max(100).trim().optional(),
+  description: z.string().max(2000).optional(),
+  website: nullableUrlSchema,
+  industry: nullableEnum(COMPANY_INDUSTRIES),
+  size: nullableEnum(COMPANY_SIZES),
+  foundedYear: z.union([
+    z.number().int(),
+    z.string().regex(/^\d{4}$/)
+  ]).optional().refine(val => {
+    if (val === undefined) return true;
+    const numeric = typeof val === 'string' ? Number(val) : val;
+    if (Number.isNaN(numeric)) return false;
+    return numeric >= 1800 && numeric <= currentYear;
+  }, { message: `Founded year must be between 1800 and ${currentYear}` }),
+  linkedin: nullableUrlSchema,
+  twitter: nullableUrlSchema
+});
+
 module.exports = {
   companyRegistrationSchema,
   studentRegistrationSchema,
@@ -109,5 +146,6 @@ module.exports = {
   updateJobSchema,
   updateCompanyStatusSchema,
   updateJobStatusSchema,
-  adminUpdateApplicationSchema
+  adminUpdateApplicationSchema,
+  companyProfileSchema
 };
