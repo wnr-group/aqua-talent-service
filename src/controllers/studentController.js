@@ -6,6 +6,7 @@ const Application = require('../models/Application');
 const { getApplicationLimit } = require('../services/subscriptionService');
 const { uploadStudentResume } = require('../services/mediaService');
 const emailService = require('../services/emailService');
+const notificationService = require('../services/notificationService');
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -381,10 +382,32 @@ exports.applyToJob = async (req, res) => {
       .populate({
         path: 'jobPostingId',
         select: 'title',
-        populate: { path: 'companyId', select: 'name' }
+        populate: { path: 'companyId', select: 'name userId' }
       });
 
     res.status(201).json(populatedApp);
+
+    const _jobTitle = populatedApp.jobPostingId.title;
+    const _companyName = populatedApp.jobPostingId.companyId?.name;
+    const _companyUserId = populatedApp.jobPostingId.companyId?.userId;
+
+    console.log("STEP A: About to call notifyApplicationSubmitted");
+
+    notificationService
+      .notifyApplicationSubmitted(student.userId, {
+        jobTitle: _jobTitle,
+        companyName: _companyName
+      })
+      .catch((err) => console.error('Notification error (submitted):', err));
+
+    if (_companyUserId) {
+      notificationService
+        .notifyApplicationReceived(_companyUserId, {
+          jobTitle: _jobTitle,
+          studentName: student.fullName
+        })
+        .catch((err) => console.error('Notification error (received):', err));
+    }
 
     emailService
       .sendApplicationStatusEmail(

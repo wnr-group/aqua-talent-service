@@ -7,6 +7,7 @@ module.exports = {
   AvailableService: require('./AvailableService'),
   ActiveSubscription: require('./ActiveSubscription'),
   PaymentRecord: require('./PaymentRecord'),
-  NotificationPreference: require('./NotificationPreference')
+  NotificationPreference: require('./NotificationPreference'),
+  Notification: require('./Notification')
 };
 
