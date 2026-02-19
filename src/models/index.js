@@ -6,6 +6,7 @@ module.exports = {
   Application: require('./Application'),
   AvailableService: require('./AvailableService'),
   ActiveSubscription: require('./ActiveSubscription'),
-  PaymentRecord: require('./PaymentRecord')
+  PaymentRecord: require('./PaymentRecord'),
+  NotificationPreference: require('./NotificationPreference')
 };
 

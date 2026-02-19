@@ -7,6 +7,7 @@ const Student = require('../models/Student');
 const { createJobSchema, updateJobSchema, companyProfileSchema } = require('../utils/validation');
 const { JOB_STATUSES, JOB_TYPES, APPLICATION_STATUSES } = require('../constants');
 const { uploadCompanyLogo } = require('../services/mediaService');
+const emailService = require('../services/emailService');
 const {
   applyCompanyProfileUpdates,
   buildCompanyProfileResponse,
@@ -634,10 +635,25 @@ exports.updateApplication = async (req, res) => {
     }
 
     const updatedApp = await Application.findById(appId)
-      .populate('studentId', 'fullName email profileLink isHired')
+      .populate('studentId', 'fullName email profileLink isHired userId')
       .populate('jobPostingId', 'title');
 
     res.json(updatedApp);
+
+    if (status === 'hired') {
+      emailService
+        .sendApplicationStatusEmail(
+          updatedApp.studentId.email,
+          {
+            status: 'hired',
+            jobTitle: updatedApp.jobPostingId.title,
+            companyName: company.name,
+            studentName: updatedApp.studentId.fullName
+          },
+          { userId: updatedApp.studentId.userId }
+        )
+        .catch((error) => console.error('Failed to send application hired email', error));
+    }
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });

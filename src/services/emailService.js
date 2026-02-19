@@ -14,13 +14,25 @@ const { logEmailSuccess, logEmailFailure, logEmailSkip } = require('../utils/ema
 const {
   getApplicationStatusTemplate,
   getWelcomeTemplate,
-  getCompanyApprovedTemplate
+  getCompanyApprovedTemplate,
+  getCompanyRejectedTemplate
 } = require('../templates/emailTemplates');
+const {
+  shouldSendEmail,
+  EMAIL_NOTIFICATION_TYPES,
+  NOTIFICATION_CHANNELS
+} = require('./notificationPreferenceService');
 
 const emailEnabled = EMAIL_ENABLED.toLowerCase() === 'true';
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
 const UNSUB_PLACEHOLDER_REGEX = /{{unsubscribe_url}}/g;
+const APPLICATION_EMAIL_TYPE_MAP = {
+  submitted: EMAIL_NOTIFICATION_TYPES.APPLICATION_SUBMITTED,
+  approved: EMAIL_NOTIFICATION_TYPES.APPLICATION_APPROVED,
+  rejected: EMAIL_NOTIFICATION_TYPES.APPLICATION_REJECTED,
+  hired: EMAIL_NOTIFICATION_TYPES.APPLICATION_HIRED
+};
 
 let mailgunClient = null;
 
@@ -120,6 +132,11 @@ const injectUnsubscribeUrl = (content, unsubscribeUrl) => {
   return content.replace(UNSUB_PLACEHOLDER_REGEX, unsubscribeUrl);
 };
 
+const getApplicationEmailType = (status = 'submitted') => {
+  const normalized = (status || 'submitted').toLowerCase();
+  return APPLICATION_EMAIL_TYPE_MAP[normalized] || EMAIL_NOTIFICATION_TYPES.APPLICATION_SUBMITTED;
+};
+
 const buildPayload = (to, subject, html, text, unsubscribeUrl) => {
   if (!MAILGUN_DOMAIN) {
     throw new Error('MAILGUN_DOMAIN is not configured');
@@ -146,49 +163,84 @@ const buildPayload = (to, subject, html, text, unsubscribeUrl) => {
   return payload;
 };
 
-const sendEmail = async (to, subject, html, text = '') =>
+const sendEmail = async (to, subject, html, text = '', options = {}) =>
   scheduleTask('sendEmail', async () => {
+    const recipients = normalizeRecipients(to);
+
     if (!emailEnabled) {
-      logEmailSkip('EMAIL_ENABLED=false, skipping send', { to, subject });
+      logEmailSkip('EMAIL_ENABLED=false, skipping send', { to: recipients, subject });
       return { skipped: true };
+    }
+
+    const { userId = null, emailType = null } = options;
+
+    if (userId && emailType) {
+      const allowSend = await shouldSendEmail({
+        userId,
+        emailType,
+        channel: NOTIFICATION_CHANNELS.EMAIL
+      });
+
+      if (!allowSend) {
+        logEmailSkip('Recipient opted out via notification preference', {
+          to: recipients,
+          emailType
+        });
+        return { skipped: true, reason: 'opted_out' };
+      }
     }
 
     const client = getClient();
     if (!client) {
       const error = new Error('Mailgun client not initialized');
-      logEmailFailure('Unable to send email', { to, subject, error: error.message });
+      logEmailFailure('Unable to send email', { to: recipients, subject, error: error.message });
       throw error;
     }
 
-    const recipients = normalizeRecipients(to);
     const unsubscribeUrl = buildUnsubscribeUrl(recipients[0]);
     const processedHtml = injectUnsubscribeUrl(html, unsubscribeUrl);
     const processedText = injectUnsubscribeUrl(text, unsubscribeUrl);
     const payload = buildPayload(recipients, subject, processedHtml, processedText, unsubscribeUrl);
 
     await executeWithRetry(() => client.messages.create(MAILGUN_DOMAIN, payload));
-    logEmailSuccess('Email sent', { to, subject });
+    logEmailSuccess('Email sent', { to: recipients, subject, emailType });
     return { success: true };
   });
 
-const sendApplicationStatusEmail = (studentEmail, applicationData = {}) => {
+const sendApplicationStatusEmail = (studentEmail, applicationData = {}, options = {}) => {
   const template = getApplicationStatusTemplate(applicationData.status, applicationData);
-  return sendEmail(studentEmail, template.subject, template.html, template.text);
+  const emailType = getApplicationEmailType(applicationData.status);
+  return sendEmail(studentEmail, template.subject, template.html, template.text, {
+    ...options,
+    emailType
+  });
 };
 
-const sendWelcomeEmail = (userEmail, userData = {}) => {
+const sendWelcomeEmail = (userEmail, userData = {}, options = {}) => {
   const template = getWelcomeTemplate(userData.userType, userData);
-  return sendEmail(userEmail, template.subject, template.html, template.text);
+  return sendEmail(userEmail, template.subject, template.html, template.text, options);
 };
 
-const sendCompanyApprovedEmail = (companyEmail, companyData = {}) => {
+const sendCompanyApprovedEmail = (companyEmail, companyData = {}, options = {}) => {
   const template = getCompanyApprovedTemplate(companyData);
-  return sendEmail(companyEmail, template.subject, template.html, template.text);
+  return sendEmail(companyEmail, template.subject, template.html, template.text, {
+    ...options,
+    emailType: EMAIL_NOTIFICATION_TYPES.COMPANY_APPROVED
+  });
+};
+
+const sendCompanyRejectedEmail = (companyEmail, companyData = {}, options = {}) => {
+  const template = getCompanyRejectedTemplate(companyData);
+  return sendEmail(companyEmail, template.subject, template.html, template.text, {
+    ...options,
+    emailType: EMAIL_NOTIFICATION_TYPES.COMPANY_REJECTED
+  });
 };
 
 module.exports = {
   sendEmail,
   sendApplicationStatusEmail,
   sendWelcomeEmail,
-  sendCompanyApprovedEmail
+  sendCompanyApprovedEmail,
+  sendCompanyRejectedEmail
 };

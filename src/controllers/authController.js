@@ -219,13 +219,19 @@ exports.registerCompany = async (req, res) => {
     });
 
   } catch (error) {
-    if (error.name === 'ZodError') {
-      return res.status(400).json({ error: error.errors[0].message });
-    }
+  console.log("Register company error:", error);
 
-    console.error(error);
-    res.status(500).json({ error: 'Registration failed. Please try again.' });
+  if (error.name === 'ZodError') {
+    return res.status(400).json({
+      error: error.issues?.[0]?.message || 'Invalid input'
+    });
   }
+
+  return res.status(500).json({
+    error: 'Registration failed. Please try again.'
+  });
+}
+
 };
 
 

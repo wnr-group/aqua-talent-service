@@ -4,6 +4,7 @@ const Company = require('../models/Company');
 const JobPosting = require('../models/JobPosting');
 const Student = require('../models/Student');
 const Application = require('../models/Application');
+const emailService = require('../services/emailService');
 const {
   updateCompanyStatusSchema,
   updateJobStatusSchema,
@@ -179,6 +180,31 @@ exports.updateCompany = async (req, res) => {
       createdAt: updatedCompany.createdAt,
       approvedAt: updatedCompany.approvedAt
     });
+
+    if (parsed.status === 'approved') {
+      emailService
+        .sendCompanyApprovedEmail(
+          updatedCompany.email,
+          {
+            companyName: updatedCompany.name,
+            recipientName: updatedCompany.name
+          },
+          { userId: company.userId }
+        )
+        .catch((error) => console.error('Failed to send company approval email', error));
+    } else if (parsed.status === 'rejected') {
+      emailService
+        .sendCompanyRejectedEmail(
+          updatedCompany.email,
+          {
+            companyName: updatedCompany.name,
+            recipientName: updatedCompany.name,
+            reason: parsed.rejectionReason || updatedCompany.rejectionReason
+          },
+          { userId: company.userId }
+        )
+        .catch((error) => console.error('Failed to send company rejection email', error));
+    }
   } catch (error) {
     if (error.name === 'ZodError') {
       return res.status(400).json({ error: error.errors[0].message });
@@ -632,7 +658,7 @@ exports.updateApplication = async (req, res) => {
       { $set: updateFields },
       { returnDocument: 'after' }
     )
-      .populate('studentId', 'fullName email profileLink isHired')
+      .populate('studentId', 'fullName email profileLink isHired userId')
       .populate({
         path: 'jobPostingId',
         select: 'title companyId',
@@ -642,7 +668,7 @@ exports.updateApplication = async (req, res) => {
         }
       });
 
-    res.json({
+    const responsePayload = {
       id: updatedApp._id.toString(),
       studentId: updatedApp.studentId._id.toString(),
       jobPostingId: updatedApp.jobPostingId._id.toString(),
@@ -665,7 +691,38 @@ exports.updateApplication = async (req, res) => {
           name: updatedApp.jobPostingId.companyId.name
         }
       }
-    });
+    };
+
+    res.json(responsePayload);
+
+    if (parsed.status === 'reviewed') {
+      emailService
+        .sendApplicationStatusEmail(
+          updatedApp.studentId.email,
+          {
+            status: 'approved',
+            jobTitle: updatedApp.jobPostingId.title,
+            companyName: updatedApp.jobPostingId.companyId.name,
+            studentName: updatedApp.studentId.fullName
+          },
+          { userId: updatedApp.studentId.userId }
+        )
+        .catch((error) => console.error('Failed to send application approval email', error));
+    } else if (parsed.status === 'rejected') {
+      emailService
+        .sendApplicationStatusEmail(
+          updatedApp.studentId.email,
+          {
+            status: 'rejected',
+            jobTitle: updatedApp.jobPostingId.title,
+            companyName: updatedApp.jobPostingId.companyId.name,
+            studentName: updatedApp.studentId.fullName,
+            reason: updatedApp.rejectionReason
+          },
+          { userId: updatedApp.studentId.userId }
+        )
+        .catch((error) => console.error('Failed to send application rejection email', error));
+    }
   } catch (error) {
     if (error.name === 'ZodError') {
       return res.status(400).json({ error: error.errors[0].message });

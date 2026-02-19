@@ -44,6 +44,8 @@ const buildTextLayout = ({ greeting, paragraphs = [], cta }) => {
 
 const getStudentName = (name) => name || 'there';
 const getCompanyName = (name) => name || 'your prospective company';
+const getRecipientName = (data = {}) =>
+  data.recipientName || data.studentName || data.firstName || data.contactName || data.companyName || null;
 
 const applicationTemplates = {
   application_submitted: (data = {}) => {
@@ -115,9 +117,21 @@ const companyApprovedTemplate = (data = {}) => {
   return { subject, paragraphs, cta };
 };
 
+const companyRejectedTemplate = (data = {}) => {
+  const subject = 'Update on your company registration';
+  const paragraphs = [
+    `${getCompanyName(data.companyName)} was not approved this time.`,
+    data.reason
+      ? `Here is the feedback we received: ${data.reason}`
+      : 'Please review your submission, update any missing details, and resubmit when ready.'
+  ];
+  const cta = data.dashboardLink ? { text: 'Update company profile', url: data.dashboardLink } : undefined;
+  return { subject, paragraphs, cta };
+};
+
 const enrichTemplate = (templateBuilder, data = {}) => {
   const { subject, paragraphs, cta } = templateBuilder(data);
-  const greeting = `Hi ${getStudentName(data.studentName || data.firstName)}!`;
+  const greeting = `Hi ${getStudentName(getRecipientName(data))}!`;
   const html = buildHtmlLayout({ title: subject, greeting, paragraphs, cta });
   const text = buildTextLayout({ greeting, paragraphs, cta });
   return { subject, html, text };
@@ -135,9 +149,9 @@ const getWelcomeTemplate = (userType = 'student', data = {}) => {
   return enrichTemplate(builder, data);
 };
 
-const getCompanyApprovedTemplate = (data = {}) => {
-  return enrichTemplate(companyApprovedTemplate, data);
-};
+const getCompanyApprovedTemplate = (data = {}) => enrichTemplate(companyApprovedTemplate, data);
+
+const getCompanyRejectedTemplate = (data = {}) => enrichTemplate(companyRejectedTemplate, data);
 
 const emailTemplateKeys = {
   application_submitted: 'application_submitted',
@@ -146,12 +160,14 @@ const emailTemplateKeys = {
   application_hired: 'application_hired',
   welcome_student: 'welcome_student',
   welcome_company: 'welcome_company',
-  company_approved: 'company_approved'
+  company_approved: 'company_approved',
+  company_rejected: 'company_rejected'
 };
 
 module.exports = {
   getApplicationStatusTemplate,
   getWelcomeTemplate,
   getCompanyApprovedTemplate,
+  getCompanyRejectedTemplate,
   emailTemplateKeys
 };
