@@ -258,6 +258,70 @@ exports.updateJob = async (req, res) => {
       return res.status(403).json({ error: 'You can only edit your own job postings' });
     }
 
+    // Handle close request — company can close approved/unpublished/pending jobs
+    if (req.body.status === 'closed') {
+      if (job.status === 'closed') {
+        return res.status(400).json({ error: 'Job is already closed' });
+      }
+      if (job.status === 'draft') {
+        return res.status(400).json({ error: 'Draft jobs cannot be closed' });
+      }
+
+      const updatedJob = await JobPosting.findByIdAndUpdate(
+        jobId,
+        { $set: { status: 'closed' } },
+        { returnDocument: 'after' }
+      );
+
+      // Reject all pending/reviewed applications for this job
+      await Application.updateMany(
+        {
+          jobPostingId: jobId,
+          status: { $in: ['pending', 'reviewed'] }
+        },
+        {
+          $set: {
+            status: 'rejected',
+            rejectionReason: 'Job posting has been closed'
+          }
+        }
+      );
+
+      return res.json(updatedJob);
+    }
+
+    // Handle unpublish request via generic update endpoint
+    if (req.body.status === 'unpublished') {
+      if (job.status !== 'approved') {
+        return res.status(400).json({ error: 'Only approved jobs can be unpublished' });
+      }
+
+      const updatedJob = await JobPosting.findByIdAndUpdate(
+        jobId,
+        { $set: { status: 'unpublished' } },
+        { returnDocument: 'after' }
+      );
+
+      return res.json(updatedJob);
+    }
+
+    // Handle republish request via generic update endpoint
+    if (req.body.status === 'pending' && job.status === 'unpublished') {
+      const updatedJob = await JobPosting.findByIdAndUpdate(
+        jobId,
+        {
+          $set: {
+            status: 'pending',
+            approvedAt: null,
+            rejectionReason: null
+          }
+        },
+        { returnDocument: 'after' }
+      );
+
+      return res.json(updatedJob);
+    }
+
     if (job.status !== 'pending' && job.status !== 'draft') {
       return res.status(403).json({ error: 'Can only edit jobs that are in draft or pending approval' });
     }
@@ -416,6 +480,66 @@ exports.republishJob = async (req, res) => {
         }
       },
       { returnDocument: 'after' }
+    );
+
+    res.json(updatedJob);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.closeJob = async (req, res) => {
+  try {
+    const { jobId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(jobId)) {
+      return res.status(400).json({ error: 'Invalid job ID format' });
+    }
+
+    const company = await Company.findOne({ userId: req.user.userId });
+
+    if (!company) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
+    const job = await JobPosting.findById(jobId);
+
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    if (!job.companyId.equals(company._id)) {
+      return res.status(403).json({ error: 'You can only manage your own job postings' });
+    }
+
+    if (job.status === 'closed') {
+      return res.status(400).json({ error: 'Job is already closed' });
+    }
+
+    if (job.status === 'draft') {
+      return res.status(400).json({ error: 'Draft jobs cannot be closed. Delete them instead.' });
+    }
+
+    // Close the job
+    const updatedJob = await JobPosting.findByIdAndUpdate(
+      jobId,
+      { $set: { status: 'closed' } },
+      { returnDocument: 'after' }
+    );
+
+    // Reject all pending/reviewed applications for this job
+    await Application.updateMany(
+      {
+        jobPostingId: jobId,
+        status: { $in: ['pending', 'reviewed'] }
+      },
+      {
+        $set: {
+          status: 'rejected',
+          rejectionReason: 'Job posting has been closed'
+        }
+      }
     );
 
     res.json(updatedJob);

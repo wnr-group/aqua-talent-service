@@ -29,6 +29,7 @@ router.get('/jobs/:jobId', companyController.getJob);
 router.patch('/jobs/:jobId', companyController.updateJob);
 router.patch('/jobs/:jobId/unpublish', companyController.unpublishJob);
 router.patch('/jobs/:jobId/republish', companyController.republishJob);
+router.patch('/jobs/:jobId/close', companyController.closeJob);
 router.get('/jobs/:jobId/applications', companyController.getJobApplications);
 router.get('/applications', companyController.getAllApplications);
 router.patch('/applications/:appId', companyController.updateApplication);
