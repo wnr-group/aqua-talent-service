@@ -232,7 +232,7 @@ exports.getJobs = async (req, res) => {
     const { status, search, location, jobType, page = 1, limit = 10 } = req.query;
 
     if (status && !JOB_STATUSES.includes(status)) {
-      return res.status(400).json({ error: 'Status must be pending, approved, rejected, or closed' });
+      return res.status(400).json({ error: `Status must be one of: ${JOB_STATUSES.join(', ')}` });
     }
 
     if (jobType && !JOB_TYPES.includes(jobType)) {

@@ -1,4 +1,4 @@
-const JOB_STATUSES = ['pending', 'approved', 'rejected', 'closed'];
+const JOB_STATUSES = ['draft', 'pending', 'approved', 'rejected', 'unpublished', 'closed'];
 
 const APPLICATION_STATUSES = ['pending', 'reviewed', 'hired', 'rejected', 'withdrawn'];
 

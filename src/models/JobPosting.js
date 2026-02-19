@@ -9,16 +9,16 @@ const JobPostingSchema = new mongoose.Schema({
   },
   title: {
     type: String,
-    required: true,
-    minlength: 5,
+    required: false,
     maxlength: 100,
-    trim: true
+    trim: true,
+    default: null
   },
   description: {
     type: String,
-    required: true,
-    minlength: 50,
-    maxlength: 5000
+    required: false,
+    maxlength: 5000,
+    default: null
   },
   requirements: {
     type: String,
@@ -27,15 +27,16 @@ const JobPostingSchema = new mongoose.Schema({
   },
   location: {
     type: String,
-    required: true,
-    minlength: 2,
+    required: false,
     maxlength: 100,
-    trim: true
+    trim: true,
+    default: null
   },
   jobType: {
     type: String,
-    required: true,
-    enum: JOB_TYPES
+    required: false,
+    enum: [...JOB_TYPES, null],
+    default: null
   },
   salaryRange: {
     type: String,
