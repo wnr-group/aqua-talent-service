@@ -5,6 +5,7 @@ const JobPosting = require('../models/JobPosting');
 const Student = require('../models/Student');
 const Application = require('../models/Application');
 const emailService = require('../services/emailService');
+const notificationService = require('../services/notificationService');
 const {
   updateCompanyStatusSchema,
   updateJobStatusSchema,
@@ -192,6 +193,10 @@ exports.updateCompany = async (req, res) => {
           { userId: company.userId }
         )
         .catch((error) => console.error('Failed to send company approval email', error));
+
+      notificationService
+        .notifyCompanyApproved(company.userId, { companyName: updatedCompany.name })
+        .catch((err) => console.error('Notification error (company approved):', err));
     } else if (parsed.status === 'rejected') {
       emailService
         .sendCompanyRejectedEmail(
@@ -204,6 +209,13 @@ exports.updateCompany = async (req, res) => {
           { userId: company.userId }
         )
         .catch((error) => console.error('Failed to send company rejection email', error));
+
+      notificationService
+        .notifyCompanyRejected(company.userId, {
+          companyName: updatedCompany.name,
+          reason: parsed.rejectionReason || updatedCompany.rejectionReason
+        })
+        .catch((err) => console.error('Notification error (company rejected):', err));
     }
   } catch (error) {
     if (error.name === 'ZodError') {
@@ -708,6 +720,13 @@ exports.updateApplication = async (req, res) => {
           { userId: updatedApp.studentId.userId }
         )
         .catch((error) => console.error('Failed to send application approval email', error));
+
+      notificationService
+        .notifyApplicationApproved(updatedApp.studentId.userId, {
+          jobTitle: updatedApp.jobPostingId.title,
+          companyName: updatedApp.jobPostingId.companyId.name
+        })
+        .catch((err) => console.error('Notification error (app approved):', err));
     } else if (parsed.status === 'rejected') {
       emailService
         .sendApplicationStatusEmail(
@@ -722,6 +741,14 @@ exports.updateApplication = async (req, res) => {
           { userId: updatedApp.studentId.userId }
         )
         .catch((error) => console.error('Failed to send application rejection email', error));
+
+      notificationService
+        .notifyApplicationRejected(updatedApp.studentId.userId, {
+          jobTitle: updatedApp.jobPostingId.title,
+          companyName: updatedApp.jobPostingId.companyId.name,
+          reason: updatedApp.rejectionReason
+        })
+        .catch((err) => console.error('Notification error (app rejected):', err));
     }
   } catch (error) {
     if (error.name === 'ZodError') {

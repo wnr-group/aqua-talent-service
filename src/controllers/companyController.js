@@ -8,6 +8,7 @@ const { createJobSchema, updateJobSchema, companyProfileSchema } = require('../u
 const { JOB_STATUSES, JOB_TYPES, APPLICATION_STATUSES } = require('../constants');
 const { uploadCompanyLogo } = require('../services/mediaService');
 const emailService = require('../services/emailService');
+const notificationService = require('../services/notificationService');
 const {
   applyCompanyProfileUpdates,
   buildCompanyProfileResponse,
@@ -865,6 +866,13 @@ exports.updateApplication = async (req, res) => {
           { userId: updatedApp.studentId.userId }
         )
         .catch((error) => console.error('Failed to send application hired email', error));
+
+      notificationService
+        .notifyApplicationHired(updatedApp.studentId.userId, {
+          jobTitle: updatedApp.jobPostingId.title,
+          companyName: company.name
+        })
+        .catch((err) => console.error('Notification error (hired):', err));
     }
   } catch (error) {
     console.error(error);

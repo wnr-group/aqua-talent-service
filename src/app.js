@@ -11,6 +11,7 @@ const serviceRoutes = require('./routes/serviceRoutes');
 const publicCompanyRoutes = require('./routes/publicCompanyRoutes');
 const unsubscribeRoutes = require('./routes/unsubscribeRoutes');
 const mediaRoutes = require('./routes/mediaRoutes');
+const notificationRoutes = require('./routes/notificationRoutes');
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim())
@@ -33,6 +34,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/services', serviceRoutes);
 app.use('/api/companies', publicCompanyRoutes);
 app.use('/api/media', mediaRoutes);
+app.use('/api/notifications', notificationRoutes);
 app.use('/', unsubscribeRoutes);
 
 import('./routes/testMailRoutes.mjs')
@@ -51,7 +53,9 @@ app.get('/api/health', (req, res) => {
     database:
       mongoose.connection.readyState === 1
         ? 'connected'
-        : 'disconnected'
+        : 'disconnected',
+    databaseName: mongoose.connection.name,   
+    databaseHost: mongoose.connection.host  
   });
 });
 

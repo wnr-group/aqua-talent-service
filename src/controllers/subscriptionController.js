@@ -7,6 +7,46 @@ const PaymentRecord = require('../models/PaymentRecord');
 const { checkSubscriptionStatus } = require('../services/subscriptionService');
 
 const generateTransactionId = () => `txn_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+const DEFAULT_PRO_PLAN_NAME = process.env.PRO_PLAN_NAME?.trim() || 'Pro Plan';
+const escapeRegex = (value = '') => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const findDefaultProPlan = async (planKey = 'pro') => {
+  const normalizedKey = String(planKey || '').trim().toLowerCase();
+
+  if (normalizedKey && normalizedKey !== 'pro') {
+    const directRegex = new RegExp(`^${escapeRegex(planKey)}$`, 'i');
+    const directMatch = await AvailableService.findOne({
+      isActive: true,
+      name: { $regex: directRegex }
+    }).sort({ createdAt: 1 });
+
+    if (directMatch) {
+      return directMatch;
+    }
+  }
+
+  const strictRegex = new RegExp(`^${escapeRegex(DEFAULT_PRO_PLAN_NAME)}$`, 'i');
+
+  const strictMatch = await AvailableService.findOne({
+    isActive: true,
+    name: { $regex: strictRegex }
+  }).sort({ createdAt: 1 });
+
+  if (strictMatch) {
+    return strictMatch;
+  }
+
+  const fuzzyMatch = await AvailableService.findOne({
+    isActive: true,
+    name: { $regex: /pro/i }
+  }).sort({ price: -1 });
+
+  if (fuzzyMatch) {
+    return fuzzyMatch;
+  }
+
+  return AvailableService.findOne({ isActive: true }).sort({ price: -1, createdAt: 1 });
+};
 
 exports.getAvailableServices = async (req, res) => {
   try {
@@ -65,9 +105,17 @@ exports.getCurrentSubscription = async (req, res) => {
 
 exports.createOrUpgradeSubscription = async (req, res) => {
   try {
-    const { serviceId, durationDays = 30, autoRenew = false, paymentMethod = 'manual', currency = 'USD', gatewayResponse = null } = req.body;
+    const {
+      serviceId,
+      planKey = 'pro',
+      durationDays = 30,
+      autoRenew = false,
+      paymentMethod = 'manual',
+      currency = 'USD',
+      gatewayResponse = null
+    } = req.body;
 
-    if (!mongoose.Types.ObjectId.isValid(serviceId)) {
+    if (serviceId && !mongoose.Types.ObjectId.isValid(serviceId)) {
       return res.status(400).json({ error: 'Invalid service ID format' });
     }
 
@@ -83,10 +131,16 @@ exports.createOrUpgradeSubscription = async (req, res) => {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    const service = await AvailableService.findOne({ _id: serviceId, isActive: true });
+    let service = null;
+
+    if (serviceId) {
+      service = await AvailableService.findOne({ _id: serviceId, isActive: true });
+    } else {
+      service = await findDefaultProPlan(planKey);
+    }
 
     if (!service) {
-      return res.status(404).json({ error: 'Subscription service not found' });
+      return res.status(404).json({ error: 'Subscription service not found. Please configure the Pro plan or provide a valid serviceId.' });
     }
 
     const now = new Date();
