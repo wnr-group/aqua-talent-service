@@ -5,6 +5,7 @@ const JobPosting = require('../models/JobPosting');
 const Application = require('../models/Application');
 const { getApplicationLimit } = require('../services/subscriptionService');
 const { uploadStudentResume } = require('../services/mediaService');
+const emailService = require('../services/emailService');
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -384,6 +385,21 @@ exports.applyToJob = async (req, res) => {
       });
 
     res.status(201).json(populatedApp);
+
+    emailService
+      .sendApplicationStatusEmail(
+        student.email,
+        {
+          status: 'submitted',
+          jobTitle: populatedApp.jobPostingId.title,
+          companyName: populatedApp.jobPostingId.companyId?.name,
+          studentName: student.fullName
+        },
+        { userId: student.userId }
+      )
+      .catch((error) => {
+        console.error('Failed to send application submission email', error);
+      });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
