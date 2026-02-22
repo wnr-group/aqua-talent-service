@@ -17,3 +17,10 @@ build/
 # Debugging
 .vscode/
 .idea/
+
+# Speckit / Feature Specs
+specs/
+.specify/
+
+# Claude Code
+.claude/

@@ -18,6 +18,27 @@ const {
   invalidatePublicCompanyProfileCache
 } = require('../services/companyProfileService');
 
+// Check if email is taken by another user (excluding current company)
+const isEmailTakenByOther = async (email, currentCompanyId) => {
+  const normalizedEmail = email.toLowerCase().trim();
+
+  // Check students
+  const studentExists = await Student.exists({ email: normalizedEmail });
+  if (studentExists) return true;
+
+  // Check other companies
+  const otherCompany = await Company.exists({
+    email: normalizedEmail,
+    _id: { $ne: currentCompanyId }
+  });
+  if (otherCompany) return true;
+
+  // Check admin email
+  if (process.env.ADMIN_EMAIL?.toLowerCase() === normalizedEmail) return true;
+
+  return false;
+};
+
 const VISIBLE_APPLICATION_STATUSES = ['reviewed', 'hired', 'rejected'];
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -778,6 +799,15 @@ exports.updateProfile = async (req, res) => {
 
     if (!company) {
       return res.status(404).json({ error: 'Company not found' });
+    }
+
+    // Handle email update with uniqueness check
+    if (parsed.email !== undefined) {
+      const emailTaken = await isEmailTakenByOther(parsed.email, company._id);
+      if (emailTaken) {
+        return res.status(409).json({ error: 'Email already registered' });
+      }
+      company.email = parsed.email.toLowerCase().trim();
     }
 
     try {

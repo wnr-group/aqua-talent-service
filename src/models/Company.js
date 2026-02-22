@@ -30,7 +30,8 @@ const CompanySchema = new mongoose.Schema({
     type: String,
     required: true,
     trim: true,
-    lowercase: true
+    lowercase: true,
+    unique: true
   },
   status: {
     type: String,
@@ -88,5 +89,6 @@ const CompanySchema = new mongoose.Schema({
 
 CompanySchema.index({ status: 1 });
 CompanySchema.index({ createdAt: -1 });
+CompanySchema.index({ email: 1 }, { unique: true });
 
-module.exports = mongoose.model('Company', CompanySchema)
+module.exports = mongoose.model('Company', CompanySchema);

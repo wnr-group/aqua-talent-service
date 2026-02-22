@@ -13,6 +13,14 @@ const unsubscribeRoutes = require('./routes/unsubscribeRoutes');
 const mediaRoutes = require('./routes/mediaRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 
+// Password reset environment warnings
+if (!process.env.ADMIN_EMAIL) {
+  console.warn('[WARNING] ADMIN_EMAIL environment variable is not set. Admin password reset will not work.');
+}
+if (!process.env.FRONTEND_URL) {
+  console.warn('[WARNING] FRONTEND_URL environment variable is not set. Password reset links will use default localhost URL.');
+}
+
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim())
   : [];

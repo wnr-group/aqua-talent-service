@@ -1,12 +1,34 @@
 const mongoose = require('mongoose');
 
 const Student = require('../models/Student');
+const Company = require('../models/Company');
 const JobPosting = require('../models/JobPosting');
 const Application = require('../models/Application');
 const { getApplicationLimit } = require('../services/subscriptionService');
 const { uploadStudentResume } = require('../services/mediaService');
 const emailService = require('../services/emailService');
 const notificationService = require('../services/notificationService');
+
+// Check if email is taken by another user (excluding current student)
+const isEmailTakenByOther = async (email, currentStudentId) => {
+  const normalizedEmail = email.toLowerCase().trim();
+
+  // Check other students
+  const otherStudent = await Student.exists({
+    email: normalizedEmail,
+    _id: { $ne: currentStudentId }
+  });
+  if (otherStudent) return true;
+
+  // Check companies
+  const companyExists = await Company.exists({ email: normalizedEmail });
+  if (companyExists) return true;
+
+  // Check admin email
+  if (process.env.ADMIN_EMAIL?.toLowerCase() === normalizedEmail) return true;
+
+  return false;
+};
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -551,6 +573,11 @@ exports.updateProfile = async (req, res) => {
     if (email !== undefined) {
       if (!isValidEmail(email)) {
         return res.status(400).json({ error: 'Invalid email format' });
+      }
+      // Check if email is taken by another user
+      const emailTaken = await isEmailTakenByOther(email, student._id);
+      if (emailTaken) {
+        return res.status(409).json({ error: 'Email already registered' });
       }
       student.email = email.toLowerCase();
       hasUpdates = true;

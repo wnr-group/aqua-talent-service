@@ -1,16 +1,76 @@
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 
 const User = require('../models/User');
 const Company = require('../models/Company');
 const Student = require('../models/Student');
 const AvailableService = require('../models/AvailableService');
 const ActiveSubscription = require('../models/ActiveSubscription');
-const { companyRegistrationSchema } = require('../utils/validation');
-const { studentRegistrationSchema } = require('../utils/validation');
+const PasswordResetToken = require('../models/PasswordResetToken');
+const {
+  companyRegistrationSchema,
+  studentRegistrationSchema,
+  forgotPasswordSchema,
+  verifyResetTokenSchema,
+  resetPasswordSchema
+} = require('../utils/validation');
+const { sendPasswordResetEmail } = require('../services/emailService');
 
+// Helper to check if email is already taken across all user types
+const isEmailTaken = async (email) => {
+  const normalizedEmail = email.toLowerCase().trim();
 
+  const [studentExists, companyExists] = await Promise.all([
+    Student.exists({ email: normalizedEmail }),
+    Company.exists({ email: normalizedEmail })
+  ]);
+
+  const isAdminEmail = process.env.ADMIN_EMAIL?.toLowerCase() === normalizedEmail;
+
+  return studentExists || companyExists || isAdminEmail;
+};
+
+// Helper to find user by email across all user types
+// Returns { user, userType, profileRecord } or null
+const findUserByEmail = async (email) => {
+  const normalizedEmail = email.toLowerCase().trim();
+
+  // Check Student first
+  const student = await Student.findOne({ email: normalizedEmail }).populate('userId');
+  if (student && student.userId) {
+    return {
+      user: student.userId,
+      userType: 'student',
+      profileRecord: student
+    };
+  }
+
+  // Check Company
+  const company = await Company.findOne({ email: normalizedEmail }).populate('userId');
+  if (company && company.userId) {
+    return {
+      user: company.userId,
+      userType: 'company',
+      profileRecord: company
+    };
+  }
+
+  // Check Admin (email stored in env, user in database)
+  if (process.env.ADMIN_EMAIL?.toLowerCase() === normalizedEmail) {
+    const adminUser = await User.findOne({ userType: 'admin' });
+    if (adminUser) {
+      return {
+        user: adminUser,
+        userType: 'admin',
+        profileRecord: null
+      };
+    }
+  }
+
+  return null;
+};
 
 exports.login = async (req, res) => {
   try {
@@ -199,6 +259,12 @@ exports.registerCompany = async (req, res) => {
       return res.status(409).json({ error: 'Username already taken' });
     }
 
+    // Check email uniqueness across all user types
+    const emailTaken = await isEmailTaken(email);
+    if (emailTaken) {
+      return res.status(409).json({ error: 'Email already registered' });
+    }
+
     const passwordHash = await bcrypt.hash(password, 10);
 
     const user = await User.create({
@@ -249,6 +315,12 @@ exports.registerStudent = async (req, res) => {
       return res.status(409).json({ error: 'Username already taken' });
     }
 
+    // Check email uniqueness across all user types
+    const emailTaken = await isEmailTaken(email);
+    if (emailTaken) {
+      return res.status(409).json({ error: 'Email already registered' });
+    }
+
     const passwordHash = await bcrypt.hash(password, 10);
 
  
@@ -295,5 +367,156 @@ exports.registerStudent = async (req, res) => {
     }
     console.error('Student registration error:', error);
     res.status(500).json({ error: 'Registration failed. Please try again.' });
+  }
+};
+
+exports.forgotPassword = async (req, res) => {
+  try {
+    // Validate input
+    const parsed = forgotPasswordSchema.parse(req.body);
+    const { email } = parsed;
+
+    // Generic success response (prevents email enumeration)
+    const genericResponse = {
+      success: true,
+      message: 'If an account exists with this email, you will receive a password reset link shortly.'
+    };
+
+    // Find user by email
+    const userInfo = await findUserByEmail(email);
+
+    // If no user found, return generic success (don't reveal email existence)
+    if (!userInfo) {
+      return res.json(genericResponse);
+    }
+
+    const { user, userType, profileRecord } = userInfo;
+
+    // Generate secure token
+    const token = crypto.randomBytes(32).toString('hex');
+
+    // Calculate expiration (1 hour from now)
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+    // Store token
+    await PasswordResetToken.create({
+      token,
+      userId: user._id,
+      userType,
+      email: email.toLowerCase().trim(),
+      expiresAt
+    });
+
+    // Build reset URL
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const resetUrl = `${frontendUrl}/reset-password?token=${token}`;
+
+    // Get user's display name
+    const recipientName = profileRecord?.fullName || profileRecord?.name || 'User';
+
+    // Send email (don't await - fire and forget for faster response)
+    sendPasswordResetEmail(email, { resetUrl, recipientName })
+      .catch(err => console.error('Failed to send password reset email:', err));
+
+    res.json(genericResponse);
+
+  } catch (error) {
+    if (error.name === 'ZodError') {
+      return res.status(400).json({ error: error.issues?.[0]?.message || 'Invalid email address' });
+    }
+    console.error('Forgot password error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// Helper to mask email for security (user@example.com -> u***@example.com)
+const maskEmail = (email) => {
+  if (!email || !email.includes('@')) return email;
+  const [localPart, domain] = email.split('@');
+  if (localPart.length <= 1) return `${localPart}***@${domain}`;
+  return `${localPart[0]}***@${domain}`;
+};
+
+exports.verifyResetToken = async (req, res) => {
+  try {
+    // Validate input
+    const parsed = verifyResetTokenSchema.parse(req.body);
+    const { token } = parsed;
+
+    // Find valid token (not used, not expired)
+    const resetToken = await PasswordResetToken.findOne({
+      token,
+      usedAt: null,
+      expiresAt: { $gt: new Date() }
+    });
+
+    if (!resetToken) {
+      return res.status(400).json({
+        valid: false,
+        error: 'Invalid or expired token'
+      });
+    }
+
+    res.json({
+      valid: true,
+      email: maskEmail(resetToken.email)
+    });
+
+  } catch (error) {
+    if (error.name === 'ZodError') {
+      return res.status(400).json({
+        valid: false,
+        error: error.issues?.[0]?.message || 'Invalid token format'
+      });
+    }
+    console.error('Verify reset token error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.resetPassword = async (req, res) => {
+  try {
+    // Validate input
+    const parsed = resetPasswordSchema.parse(req.body);
+    const { token, password } = parsed;
+
+    // Find valid token (not used, not expired)
+    const resetToken = await PasswordResetToken.findOne({
+      token,
+      usedAt: null,
+      expiresAt: { $gt: new Date() }
+    });
+
+    if (!resetToken) {
+      return res.status(400).json({
+        error: 'Invalid or expired token'
+      });
+    }
+
+    // Hash new password
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    // Update user's password
+    await User.findByIdAndUpdate(resetToken.userId, {
+      passwordHash
+    });
+
+    // Mark token as used
+    resetToken.usedAt = new Date();
+    await resetToken.save();
+
+    res.json({
+      success: true,
+      message: 'Password has been reset successfully. You can now log in with your new password.'
+    });
+
+  } catch (error) {
+    if (error.name === 'ZodError') {
+      return res.status(400).json({
+        error: error.issues?.[0]?.message || 'Invalid input'
+      });
+    }
+    console.error('Reset password error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 };

@@ -153,6 +153,19 @@ const getCompanyApprovedTemplate = (data = {}) => enrichTemplate(companyApproved
 
 const getCompanyRejectedTemplate = (data = {}) => enrichTemplate(companyRejectedTemplate, data);
 
+const passwordResetTemplate = (data = {}) => {
+  const subject = 'Reset your AquaTalentz password';
+  const paragraphs = [
+    'We received a request to reset your password.',
+    'Click the button below to create a new password. This link will expire in 1 hour.',
+    'If you didn\'t request this, you can safely ignore this email—your password will remain unchanged.'
+  ];
+  const cta = data.resetUrl ? { text: 'Reset Password', url: data.resetUrl } : undefined;
+  return { subject, paragraphs, cta };
+};
+
+const getPasswordResetTemplate = (data = {}) => enrichTemplate(passwordResetTemplate, data);
+
 const emailTemplateKeys = {
   application_submitted: 'application_submitted',
   application_approved: 'application_approved',
@@ -161,7 +174,8 @@ const emailTemplateKeys = {
   welcome_student: 'welcome_student',
   welcome_company: 'welcome_company',
   company_approved: 'company_approved',
-  company_rejected: 'company_rejected'
+  company_rejected: 'company_rejected',
+  password_reset: 'password_reset'
 };
 
 module.exports = {
@@ -169,5 +183,6 @@ module.exports = {
   getWelcomeTemplate,
   getCompanyApprovedTemplate,
   getCompanyRejectedTemplate,
+  getPasswordResetTemplate,
   emailTemplateKeys
 };

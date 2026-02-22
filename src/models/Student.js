@@ -80,7 +80,8 @@ const StudentSchema = new mongoose.Schema({
     type: String,
     required: true,
     trim: true,
-    lowercase: true
+    lowercase: true,
+    unique: true
   },
   profileLink: {
     type: String,
@@ -149,5 +150,6 @@ const StudentSchema = new mongoose.Schema({
 
 // Indexes
 StudentSchema.index({ isHired: 1 });
+StudentSchema.index({ email: 1 }, { unique: true });
 
 module.exports = mongoose.model('Student', StudentSchema);

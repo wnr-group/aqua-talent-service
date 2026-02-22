@@ -167,6 +167,7 @@ const nullableFoundedYear = z.union([
 
 const companyProfileSchema = z.object({
   name: z.string().min(2).max(100).trim().optional(),
+  email: z.string().email('Invalid email format').optional(),
   description: z.string().max(2000).optional().nullable(),
   website: nullableUrlSchema,
   industry: nullableEnum(COMPANY_INDUSTRIES),
@@ -180,6 +181,20 @@ const companyProfileSchema = z.object({
   }).optional()
 });
 
+// Password Reset Schemas
+const forgotPasswordSchema = z.object({
+  email: z.string().email('Invalid email address')
+});
+
+const verifyResetTokenSchema = z.object({
+  token: z.string().length(64, 'Invalid token format')
+});
+
+const resetPasswordSchema = z.object({
+  token: z.string().length(64, 'Invalid token format'),
+  password: z.string().min(8, 'Password must be at least 8 characters')
+});
+
 module.exports = {
   companyRegistrationSchema,
   studentRegistrationSchema,
@@ -189,5 +204,8 @@ module.exports = {
   updateCompanyStatusSchema,
   updateJobStatusSchema,
   adminUpdateApplicationSchema,
-  companyProfileSchema
+  companyProfileSchema,
+  forgotPasswordSchema,
+  verifyResetTokenSchema,
+  resetPasswordSchema
 };

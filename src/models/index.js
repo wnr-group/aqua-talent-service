@@ -8,6 +8,7 @@ module.exports = {
   ActiveSubscription: require('./ActiveSubscription'),
   PaymentRecord: require('./PaymentRecord'),
   NotificationPreference: require('./NotificationPreference'),
-  Notification: require('./Notification')
+  Notification: require('./Notification'),
+  PasswordResetToken: require('./PasswordResetToken')
 };
 

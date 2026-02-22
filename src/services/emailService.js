@@ -15,7 +15,8 @@ const {
   getApplicationStatusTemplate,
   getWelcomeTemplate,
   getCompanyApprovedTemplate,
-  getCompanyRejectedTemplate
+  getCompanyRejectedTemplate,
+  getPasswordResetTemplate
 } = require('../templates/emailTemplates');
 const {
   shouldSendEmail,
@@ -237,10 +238,16 @@ const sendCompanyRejectedEmail = (companyEmail, companyData = {}, options = {}) 
   });
 };
 
+const sendPasswordResetEmail = (userEmail, resetData = {}, options = {}) => {
+  const template = getPasswordResetTemplate(resetData);
+  return sendEmail(userEmail, template.subject, template.html, template.text, options);
+};
+
 module.exports = {
   sendEmail,
   sendApplicationStatusEmail,
   sendWelcomeEmail,
   sendCompanyApprovedEmail,
-  sendCompanyRejectedEmail
+  sendCompanyRejectedEmail,
+  sendPasswordResetEmail
 };
