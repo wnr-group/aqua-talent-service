@@ -39,20 +39,7 @@ const APPLICATION_EMAIL_TYPE_MAP = {
 let mailgunClient = null;
 
 const normalizeMailgunApiKey = () => {
-  const rawKey = String(MAILGUN_API_KEY || '').trim();
-  if (!rawKey) {
-    return '';
-  }
-
-  if (rawKey.startsWith('key-')) {
-    return rawKey;
-  }
-
-  if (/^[a-f0-9]{20,}-[a-f0-9-]{6,}$/i.test(rawKey)) {
-    return `key-${rawKey}`;
-  }
-
-  return rawKey;
+  return String(MAILGUN_API_KEY || '').trim();
 };
 
 const normalizeMailgunBaseUrl = () => {
@@ -135,9 +122,6 @@ const initializeClient = () => {
     return null;
   }
 
-  if (normalizedApiKey !== String(MAILGUN_API_KEY || '').trim()) {
-    logEmailSkip('MAILGUN_API_KEY appears to be missing key- prefix; applying normalized key format.');
-  }
 
   const resolvedBaseUrl = normalizeMailgunBaseUrl();
   return buildMailgunClient(resolvedBaseUrl);
