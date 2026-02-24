@@ -77,7 +77,7 @@ exports.markAsRead = async (req, res) => {
     const notification = await Notification.findOneAndUpdate(
       { _id: id, recipientId: req.user.userId },
       { $set: { isRead: true } },
-      { new: true }
+      { returnDocument: 'after' }
     );
 
     if (!notification) {

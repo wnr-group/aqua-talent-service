@@ -1,6 +1,41 @@
 const JOB_STATUSES = ['draft', 'pending', 'approved', 'rejected', 'unpublished', 'closed'];
 
-const APPLICATION_STATUSES = ['pending', 'reviewed', 'hired', 'rejected', 'withdrawn'];
+const APPLICATION_STATUSES = ['pending', 'reviewed', 'interview_scheduled', 'offer_extended', 'hired', 'rejected', 'withdrawn'];
+
+const STUDENT_APPLICATION_STATUS_MAP = {
+  pending: {
+    studentFacingStatus: 'Under Review',
+    statusMessage: "Your application is under review. We'll notify you of any updates."
+  },
+  reviewed: {
+    studentFacingStatus: 'Shortlisted',
+    statusMessage: 'Great news! Your application has been shortlisted. The company will be in touch soon.'
+  },
+  interview_scheduled: {
+    studentFacingStatus: 'Interview Scheduled',
+    statusMessage: 'Congratulations! An interview has been scheduled for you. Check your email for details.'
+  },
+  offer_extended: {
+    studentFacingStatus: 'Offer Extended',
+    statusMessage: 'Amazing news! You have received an offer. Please check your email for the next steps.'
+  },
+  hired: {
+    studentFacingStatus: 'Hired',
+    statusMessage: 'Congratulations! You have been hired. Welcome aboard!'
+  },
+  rejected_admin: {
+    studentFacingStatus: 'Not Selected',
+    statusMessage: "We appreciate your interest. Unfortunately, you weren't selected at this stage. Keep applying!"
+  },
+  rejected_company: {
+    studentFacingStatus: 'Not Selected',
+    statusMessage: "We appreciate your interest. Unfortunately, you weren't selected for this role. Keep applying!"
+  },
+  withdrawn: {
+    studentFacingStatus: 'Withdrawn',
+    statusMessage: 'You have withdrawn this application.'
+  }
+};
 
 const COMPANY_STATUSES = ['pending', 'approved', 'rejected'];
 
@@ -52,6 +87,7 @@ const BILLING_CYCLES = ['monthly', 'quarterly', 'yearly', 'one-time'];
 module.exports = {
   JOB_STATUSES,
   APPLICATION_STATUSES,
+  STUDENT_APPLICATION_STATUS_MAP,
   COMPANY_STATUSES,
   JOB_TYPES,
   SUBSCRIPTION_STATUSES,

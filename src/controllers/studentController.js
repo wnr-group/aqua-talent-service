@@ -4,7 +4,9 @@ const Student = require('../models/Student');
 const Company = require('../models/Company');
 const JobPosting = require('../models/JobPosting');
 const Application = require('../models/Application');
+const { STUDENT_APPLICATION_STATUS_MAP } = require('../constants');
 const { getApplicationLimit } = require('../services/subscriptionService');
+const { validateWithdrawal } = require('../services/applicationService');
 const { uploadStudentResume } = require('../services/mediaService');
 const emailService = require('../services/emailService');
 const notificationService = require('../services/notificationService');
@@ -101,6 +103,69 @@ const buildProfileResponse = (student) => ({
   introVideoUrl: student.introVideoUrl || '',
   isHired: student.isHired
 });
+
+const formatInterviewDateTime = (value) => {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  const formatted = new Intl.DateTimeFormat('en-US', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZone: 'UTC'
+  }).format(date);
+
+  return `${formatted} UTC`;
+};
+
+const getStudentFacingStatusPayload = (application) => {
+  if (application.status === 'rejected') {
+    if (application.rejectionSource === 'company') {
+      const basePayload = STUDENT_APPLICATION_STATUS_MAP.rejected_company;
+      const normalizedReason = typeof application.rejectionReason === 'string'
+        ? application.rejectionReason.trim()
+        : '';
+
+      if (!normalizedReason) {
+        return basePayload;
+      }
+
+      return {
+        ...basePayload,
+        statusMessage: `${basePayload.statusMessage} Reason: ${normalizedReason}`
+      };
+    }
+
+    return STUDENT_APPLICATION_STATUS_MAP.rejected_admin;
+  }
+
+  if (application.status === 'interview_scheduled') {
+    const basePayload = STUDENT_APPLICATION_STATUS_MAP.interview_scheduled || {
+      studentFacingStatus: 'Interview Scheduled',
+      statusMessage: 'Great news! Check your email for interview details.'
+    };
+    const formattedInterviewDate = formatInterviewDateTime(application.interviewDate);
+
+    if (!formattedInterviewDate) {
+      return basePayload;
+    }
+
+    return {
+      ...basePayload,
+      statusMessage: `${basePayload.statusMessage} Interview time: ${formattedInterviewDate}.`
+    };
+  }
+
+  return STUDENT_APPLICATION_STATUS_MAP[application.status] || {
+    studentFacingStatus: 'Under Review',
+    statusMessage: "Your application is under review. We'll notify you of any updates."
+  };
+};
 
 const buildCompleteness = (student) => {
   const sections = [
@@ -467,9 +532,25 @@ exports.getApplications = async (req, res) => {
         select: 'title location jobType',
         populate: { path: 'companyId', select: 'name' }
       })
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
 
-    res.json({ applications });
+    const shapedApplications = applications.map((application) => {
+      const { studentFacingStatus, statusMessage } = getStudentFacingStatusPayload(application);
+      const responseApplication = {
+        ...application,
+        studentFacingStatus,
+        statusMessage
+      };
+
+      if (application.status === 'rejected' && application.rejectionSource !== 'company') {
+        responseApplication.rejectionReason = null;
+      }
+
+      return responseApplication;
+    });
+
+    res.json({ applications: shapedApplications });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
@@ -500,16 +581,10 @@ exports.withdrawApplication = async (req, res) => {
       return res.status(403).json({ error: 'You can only withdraw your own applications' });
     }
 
-    if (application.status === 'withdrawn') {
-      return res.status(400).json({ error: 'Application already withdrawn' });
-    }
-
-    if (application.status === 'hired') {
-      return res.status(400).json({ error: 'Cannot withdraw after being hired' });
-    }
-
-    if (application.status === 'rejected') {
-      return res.status(400).json({ error: 'Cannot withdraw a rejected application' });
+    // Service-layer business rule: withdrawal is disallowed at every stage.
+    const withdrawalCheck = validateWithdrawal(application);
+    if (!withdrawalCheck.allowed) {
+      return res.status(403).json({ error: withdrawalCheck.message });
     }
 
     application.status = 'withdrawn';

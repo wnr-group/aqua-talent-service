@@ -17,6 +17,13 @@ const {
   resetPasswordSchema
 } = require('../utils/validation');
 const { sendPasswordResetEmail } = require('../services/emailService');
+const notificationService = require('../services/notificationService');
+
+const trimTrailingSlash = (value = '') => value.replace(/\/$/, '');
+const getFrontendBaseUrl = () => {
+  const configuredBase = process.env.FRONTEND_URL || process.env.FRONTEND_BASE_URL || process.env.APP_BASE_URL || 'http://localhost:3000';
+  return trimTrailingSlash(String(configuredBase).trim());
+};
 
 // Helper to check if email is already taken across all user types
 const isEmailTaken = async (email) => {
@@ -273,7 +280,7 @@ exports.registerCompany = async (req, res) => {
       userType: 'company'
     });
 
-    await Company.create({
+    const company = await Company.create({
       userId: user._id,  
       name: companyName,
       email,
@@ -285,6 +292,14 @@ exports.registerCompany = async (req, res) => {
       message:
         'Registration submitted for approval. You will be able to login once an administrator approves your account.'
     });
+
+    if (company.status === 'pending') {
+      notificationService
+        .notifyAdminsNewCompanyPending({ companyId: company._id, companyName: company.name })
+        .catch((error) => {
+          console.error('Admin notification error (new company pending):', error);
+        });
+    }
 
   } catch (error) {
   console.log("Register company error:", error);
@@ -408,7 +423,7 @@ exports.forgotPassword = async (req, res) => {
     });
 
     // Build reset URL
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const frontendUrl = getFrontendBaseUrl();
     const resetUrl = `${frontendUrl}/reset-password?token=${token}`;
 
     // Get user's display name
