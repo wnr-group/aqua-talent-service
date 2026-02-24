@@ -29,8 +29,6 @@ SystemConfigSchema.pre('save', function() {
   this.updatedAt = new Date();
 });
 
-SystemConfigSchema.index({ key: 1 }, { unique: true });
-
 // Static method to get a config value with default
 SystemConfigSchema.statics.getValue = async function(key, defaultValue = null) {
   const config = await this.findOne({ key });
@@ -46,7 +44,7 @@ SystemConfigSchema.statics.setValue = async function(key, value, description = n
   return this.findOneAndUpdate(
     { key },
     { $set: update, $setOnInsert: { key } },
-    { upsert: true, new: true, runValidators: true }
+    { upsert: true, returnDocument: 'after', runValidators: true }
   );
 };
 

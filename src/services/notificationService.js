@@ -7,6 +7,7 @@
  */
 
 const Notification = require('../models/Notification');
+const User = require('../models/User');
 
 // ─── Low-level helpers ─────────────────────────────────────────────────────
 
@@ -107,6 +108,16 @@ const notifyApplicationReceived = (companyUserId, { jobTitle, studentName, appli
     link: `/applications`
   });
 
+const notifyJobApproved = (companyUserId, { jobTitle }) =>
+  createNotification({
+    recipientId: companyUserId,
+    recipientType: 'company',
+    type: 'job_approved',
+    title: 'Job posting approved',
+    message: `Your job posting "${jobTitle}" has been approved and is now live.`,
+    link: `/company/jobs`
+  });
+
 // ─── Company registration notifications ────────────────────────────────────
 
 /**
@@ -125,8 +136,9 @@ const notifyCompanyApproved = (companyUserId, { companyName }) =>
 /**
  * Company: their registration was rejected by admin.
  */
-const notifyCompanyRejected = (companyUserId, { companyName, reason }) => {
-  const reasonSuffix = reason ? ` Reason: ${reason}` : '';
+const notifyCompanyRejected = (companyUserId, { companyName, reason, rejectionReason }) => {
+  const rejectionDetails = rejectionReason || reason;
+  const reasonSuffix = rejectionDetails ? ` Reason: ${rejectionDetails}` : '';
   return createNotification({
     recipientId: companyUserId,
     recipientType: 'company',
@@ -135,6 +147,102 @@ const notifyCompanyRejected = (companyUserId, { companyName, reason }) => {
     message: `Registration for ${companyName} was not approved.${reasonSuffix}`,
     link: `/company/dashboard`
   });
+};
+
+const getAdminUserIds = async () => {
+  try {
+    const admins = await User.find({ userType: 'admin' }).select('_id').lean();
+    return admins.map((admin) => admin._id);
+  } catch (error) {
+    console.error('[notificationService] Failed to fetch admin recipients', {
+      error: error.message
+    });
+    return [];
+  }
+};
+
+const notifyAdminsNewCompanyPending = async ({ companyId, companyName }) => {
+  try {
+    const adminIds = await getAdminUserIds();
+    if (!adminIds.length) {
+      return [];
+    }
+
+    return Promise.all(
+      adminIds.map((adminId) =>
+        createNotification({
+          recipientId: adminId,
+          recipientType: 'admin',
+          type: 'ADMIN_NEW_COMPANY_PENDING',
+          title: 'New Company Registration Pending Approval',
+          message: `${companyName} has registered and requires verification.`,
+          link: `/admin/companies/${companyId}`
+        })
+      )
+    );
+  } catch (error) {
+    console.error('[notificationService] Failed admin notification for company pending', {
+      error: error.message,
+      companyId
+    });
+    return [];
+  }
+};
+
+const notifyAdminsNewJobPending = async ({ jobId, companyName }) => {
+  try {
+    const adminIds = await getAdminUserIds();
+    if (!adminIds.length) {
+      return [];
+    }
+
+    return Promise.all(
+      adminIds.map((adminId) =>
+        createNotification({
+          recipientId: adminId,
+          recipientType: 'admin',
+          type: 'ADMIN_NEW_JOB_PENDING',
+          title: 'New Job Posting Pending Review',
+          message: `${companyName} submitted a job for approval.`,
+          link: `/admin/jobs/${jobId}`
+        })
+      )
+    );
+  } catch (error) {
+    console.error('[notificationService] Failed admin notification for job pending', {
+      error: error.message,
+      jobId
+    });
+    return [];
+  }
+};
+
+const notifyAdminsCompanyReverifyRequired = async ({ companyId, companyName }) => {
+  try {
+    const adminIds = await getAdminUserIds();
+    if (!adminIds.length) {
+      return [];
+    }
+
+    return Promise.all(
+      adminIds.map((adminId) =>
+        createNotification({
+          recipientId: adminId,
+          recipientType: 'admin',
+          type: 'ADMIN_COMPANY_REVERIFY_REQUIRED',
+          title: 'Company Profile Update Requires Review',
+          message: `${companyName} updated verification details.`,
+          link: `/admin/companies/${companyId}`
+        })
+      )
+    );
+  } catch (error) {
+    console.error('[notificationService] Failed admin notification for company reverification', {
+      error: error.message,
+      companyId
+    });
+    return [];
+  }
 };
 
 // ─── Exports ───────────────────────────────────────────────────────────────
@@ -146,6 +254,10 @@ module.exports = {
   notifyApplicationRejected,
   notifyApplicationHired,
   notifyApplicationReceived,
+  notifyJobApproved,
   notifyCompanyApproved,
-  notifyCompanyRejected
+  notifyCompanyRejected,
+  notifyAdminsNewCompanyPending,
+  notifyAdminsNewJobPending,
+  notifyAdminsCompanyReverifyRequired
 };

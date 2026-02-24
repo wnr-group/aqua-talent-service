@@ -4,7 +4,8 @@ const FormData = require('form-data');
 const {
   MAILGUN_API_KEY,
   MAILGUN_DOMAIN,
-  MAILGUN_BASE_URL = 'https://api.mailgun.net',
+  MAILGUN_BASE_URL = '',
+  MAILGUN_REGION = 'us',
   MAILGUN_FROM_EMAIL,
   EMAIL_ENABLED = 'false',
   APP_BASE_URL = ''
@@ -37,25 +38,109 @@ const APPLICATION_EMAIL_TYPE_MAP = {
 
 let mailgunClient = null;
 
-const initializeClient = () => {
-  if (!emailEnabled) {
+const normalizeMailgunApiKey = () => {
+  const rawKey = String(MAILGUN_API_KEY || '').trim();
+  if (!rawKey) {
+    return '';
+  }
+
+  if (rawKey.startsWith('key-')) {
+    return rawKey;
+  }
+
+  if (/^[a-f0-9]{20,}-[a-f0-9-]{6,}$/i.test(rawKey)) {
+    return `key-${rawKey}`;
+  }
+
+  return rawKey;
+};
+
+const normalizeMailgunBaseUrl = () => {
+  if (MAILGUN_BASE_URL) {
+    return MAILGUN_BASE_URL;
+  }
+
+  const region = String(MAILGUN_REGION || 'us').toLowerCase();
+  return region === 'eu' ? 'https://api.eu.mailgun.net' : 'https://api.mailgun.net';
+};
+
+const extractEmailDomain = (fromEmail) => {
+  const rawFrom = String(fromEmail || '').trim();
+  if (!rawFrom) {
+    return '';
+  }
+
+  const bracketMatch = rawFrom.match(/<([^>]+)>/);
+  const emailValue = (bracketMatch?.[1] || rawFrom).trim();
+  const atIndex = emailValue.lastIndexOf('@');
+
+  if (atIndex === -1) {
+    return '';
+  }
+
+  return emailValue.slice(atIndex + 1).toLowerCase();
+};
+
+const getFallbackMailgunBaseUrl = (currentBaseUrl) => {
+  if (MAILGUN_BASE_URL) {
     return null;
   }
 
-  if (!MAILGUN_API_KEY || !MAILGUN_DOMAIN || !MAILGUN_FROM_EMAIL) {
-    logEmailFailure('Mailgun configuration incomplete', {
-      MAILGUN_DOMAIN: Boolean(MAILGUN_DOMAIN),
-      MAILGUN_FROM_EMAIL: Boolean(MAILGUN_FROM_EMAIL)
-    });
+  if (String(currentBaseUrl || '').includes('api.eu.mailgun.net')) {
+    return 'https://api.mailgun.net';
+  }
+
+  return 'https://api.eu.mailgun.net';
+};
+
+const buildMailgunClient = (baseUrl) => {
+  const normalizedApiKey = normalizeMailgunApiKey();
+
+  if (!normalizedApiKey) {
     return null;
   }
 
   const mailgun = new Mailgun(FormData);
   return mailgun.client({
     username: 'api',
-    key: MAILGUN_API_KEY,
-    url: MAILGUN_BASE_URL
+    key: normalizedApiKey,
+    url: baseUrl
   });
+};
+
+const initializeClient = () => {
+  if (!emailEnabled) {
+    return null;
+  }
+
+  const normalizedApiKey = normalizeMailgunApiKey();
+
+  if (!normalizedApiKey || !MAILGUN_DOMAIN || !MAILGUN_FROM_EMAIL) {
+    logEmailFailure('Mailgun configuration incomplete', {
+      MAILGUN_API_KEY: Boolean(normalizedApiKey),
+      MAILGUN_DOMAIN: Boolean(MAILGUN_DOMAIN),
+      MAILGUN_FROM_EMAIL: Boolean(MAILGUN_FROM_EMAIL)
+    });
+    return null;
+  }
+
+  const configuredDomain = String(MAILGUN_DOMAIN || '').trim().toLowerCase();
+  const senderDomain = extractEmailDomain(MAILGUN_FROM_EMAIL);
+
+  if (!senderDomain || senderDomain !== configuredDomain) {
+    logEmailFailure('MAILGUN_FROM_EMAIL domain must match MAILGUN_DOMAIN', {
+      MAILGUN_DOMAIN: configuredDomain || null,
+      MAILGUN_FROM_EMAIL_DOMAIN: senderDomain || null
+    });
+    return null;
+  }
+
+  if (normalizedApiKey !== String(MAILGUN_API_KEY || '').trim()) {
+    logEmailSkip('MAILGUN_API_KEY appears to be missing key- prefix; applying normalized key format.');
+  }
+
+  const resolvedBaseUrl = normalizeMailgunBaseUrl();
+  return buildMailgunClient(resolvedBaseUrl);
 };
 
 const getClient = () => {
@@ -67,10 +152,24 @@ const getClient = () => {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const shouldRetryError = (error) => {
+  const status = error?.status;
+
+  if (status && [400, 401, 403, 404, 422].includes(status)) {
+    return false;
+  }
+
+  return true;
+};
+
 const executeWithRetry = async (fn, attempt = 1) => {
   try {
     return await fn();
   } catch (error) {
+    if (!shouldRetryError(error)) {
+      throw error;
+    }
+
     if (attempt >= MAX_RETRIES) {
       throw error;
     }
@@ -203,7 +302,42 @@ const sendEmail = async (to, subject, html, text = '', options = {}) =>
     const processedText = injectUnsubscribeUrl(text, unsubscribeUrl);
     const payload = buildPayload(recipients, subject, processedHtml, processedText, unsubscribeUrl);
 
-    await executeWithRetry(() => client.messages.create(MAILGUN_DOMAIN, payload));
+    try {
+      await executeWithRetry(() => client.messages.create(MAILGUN_DOMAIN, payload));
+    } catch (error) {
+      if (error?.status === 401 || error?.status === 403) {
+        const currentBaseUrl = normalizeMailgunBaseUrl();
+        const fallbackBaseUrl = getFallbackMailgunBaseUrl(currentBaseUrl);
+
+        if (fallbackBaseUrl) {
+          const fallbackClient = buildMailgunClient(fallbackBaseUrl);
+
+          if (fallbackClient) {
+            try {
+              await executeWithRetry(() => fallbackClient.messages.create(MAILGUN_DOMAIN, payload));
+              logEmailSuccess('Email sent using Mailgun regional fallback', { to: recipients, subject, emailType, fallbackBaseUrl });
+              return { success: true, fallbackBaseUrl };
+            } catch (fallbackError) {
+              error = fallbackError;
+            }
+          }
+        }
+      }
+
+      if (error?.status === 401 || error?.status === 403) {
+        logEmailFailure('Mailgun authorization failed. Verify MAILGUN_API_KEY, MAILGUN_DOMAIN, MAILGUN_FROM_EMAIL and MAILGUN_REGION/MAILGUN_BASE_URL.', {
+          status: error?.status,
+          details: error?.details,
+          type: error?.type,
+          MAILGUN_DOMAIN: Boolean(MAILGUN_DOMAIN),
+          MAILGUN_FROM_EMAIL: Boolean(MAILGUN_FROM_EMAIL),
+          MAILGUN_BASE_URL: normalizeMailgunBaseUrl(),
+          MAILGUN_REGION
+        });
+      }
+      throw error;
+    }
+
     logEmailSuccess('Email sent', { to: recipients, subject, emailType });
     return { success: true };
   });

@@ -6,8 +6,12 @@ const NOTIFICATION_TYPES = [
   'application_rejected',
   'application_hired',
   'application_received',
+  'job_approved',
   'company_approved',
-  'company_rejected'
+  'company_rejected',
+  'ADMIN_NEW_COMPANY_PENDING',
+  'ADMIN_NEW_JOB_PENDING',
+  'ADMIN_COMPANY_REVERIFY_REQUIRED'
 ];
 
 const RECIPIENT_TYPES = ['student', 'company', 'admin'];

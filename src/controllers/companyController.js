@@ -18,6 +18,8 @@ const {
   invalidatePublicCompanyProfileCache
 } = require('../services/companyProfileService');
 
+const COMPANY_REVERIFICATION_FIELDS = ['name', 'email', 'website', 'industry', 'size', 'foundedYear'];
+
 // Check if email is taken by another user (excluding current company)
 const isEmailTakenByOther = async (email, currentCompanyId) => {
   const normalizedEmail = email.toLowerCase().trim();
@@ -213,6 +215,14 @@ exports.createJob = async (req, res) => {
     });
 
     res.status(201).json(job);
+
+    if (job.status === 'pending') {
+      notificationService
+        .notifyAdminsNewJobPending({ jobId: job._id, companyName: company.name })
+        .catch((error) => {
+          console.error('Admin notification error (new job pending):', error);
+        });
+    }
   } catch (error) {
     if (error.name === 'ZodError') {
       return res.status(400).json({ error: error.issues[0].message });
@@ -410,6 +420,14 @@ exports.updateJob = async (req, res) => {
     );
 
     res.json(updatedJob);
+
+    if (wantsToSubmit && updatedJob.status === 'pending') {
+      notificationService
+        .notifyAdminsNewJobPending({ jobId: updatedJob._id, companyName: company.name })
+        .catch((error) => {
+          console.error('Admin notification error (draft submitted for review):', error);
+        });
+    }
   } catch (error) {
     if (error.name === 'ZodError') {
       return res.status(400).json({ error: error.issues[0].message });
@@ -801,6 +819,11 @@ exports.updateProfile = async (req, res) => {
       return res.status(404).json({ error: 'Company not found' });
     }
 
+    const previousVerificationValues = COMPANY_REVERIFICATION_FIELDS.reduce((accumulator, field) => {
+      accumulator[field] = company[field] ?? null;
+      return accumulator;
+    }, {});
+
     // Handle email update with uniqueness check
     if (parsed.email !== undefined) {
       const emailTaken = await isEmailTakenByOther(parsed.email, company._id);
@@ -823,6 +846,20 @@ exports.updateProfile = async (req, res) => {
     invalidatePublicCompanyProfileCache(company._id);
 
     res.json({ profile: buildCompanyProfileResponse(company) });
+
+    const verificationFieldChanged = COMPANY_REVERIFICATION_FIELDS.some((field) => {
+      const previousValue = previousVerificationValues[field];
+      const nextValue = company[field] ?? null;
+      return String(previousValue) !== String(nextValue);
+    });
+
+    if (verificationFieldChanged && company.status === 'pending') {
+      notificationService
+        .notifyAdminsCompanyReverifyRequired({ companyId: company._id, companyName: company.name })
+        .catch((error) => {
+          console.error('Admin notification error (company reverify required):', error);
+        });
+    }
   } catch (error) {
     if (error.name === 'ZodError') {
       return res.status(400).json({ error: error.issues[0].message });

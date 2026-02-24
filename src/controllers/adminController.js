@@ -197,6 +197,8 @@ exports.updateCompany = async (req, res) => {
       return res.status(404).json({ error: 'Company not found' });
     }
 
+    const previousStatus = company.status;
+
     const updateFields = { status: parsed.status };
 
     if (parsed.status === 'approved') {
@@ -226,7 +228,10 @@ exports.updateCompany = async (req, res) => {
       approvedAt: updatedCompany.approvedAt
     });
 
-    if (parsed.status === 'approved') {
+    const statusChanged = previousStatus !== updatedCompany.status;
+    const companyUserId = updatedCompany.userId?._id || updatedCompany.userId;
+
+    if (statusChanged && parsed.status === 'approved') {
       emailService
         .sendCompanyApprovedEmail(
           updatedCompany.email,
@@ -234,14 +239,14 @@ exports.updateCompany = async (req, res) => {
             companyName: updatedCompany.name,
             recipientName: updatedCompany.name
           },
-          { userId: company.userId }
+          { userId: companyUserId }
         )
         .catch((error) => console.error('Failed to send company approval email', error));
 
       notificationService
-        .notifyCompanyApproved(company.userId, { companyName: updatedCompany.name })
+        .notifyCompanyApproved(companyUserId, { companyName: updatedCompany.name })
         .catch((err) => console.error('Notification error (company approved):', err));
-    } else if (parsed.status === 'rejected') {
+    } else if (statusChanged && parsed.status === 'rejected') {
       emailService
         .sendCompanyRejectedEmail(
           updatedCompany.email,
@@ -250,14 +255,14 @@ exports.updateCompany = async (req, res) => {
             recipientName: updatedCompany.name,
             reason: parsed.rejectionReason || updatedCompany.rejectionReason
           },
-          { userId: company.userId }
+          { userId: companyUserId }
         )
         .catch((error) => console.error('Failed to send company rejection email', error));
 
       notificationService
-        .notifyCompanyRejected(company.userId, {
+        .notifyCompanyRejected(companyUserId, {
           companyName: updatedCompany.name,
-          reason: parsed.rejectionReason || updatedCompany.rejectionReason
+          rejectionReason: parsed.rejectionReason || updatedCompany.rejectionReason
         })
         .catch((err) => console.error('Notification error (company rejected):', err));
     }
@@ -411,6 +416,8 @@ exports.updateJob = async (req, res) => {
       return res.status(404).json({ error: 'Job not found' });
     }
 
+    const previousStatus = job.status;
+
     const updateFields = { status: parsed.status };
 
     if (parsed.status === 'approved') {
@@ -428,7 +435,7 @@ exports.updateJob = async (req, res) => {
       jobId,
       { $set: updateFields },
       { returnDocument: 'after' }
-    ).populate('companyId', 'name');
+    ).populate('companyId', 'name userId');
 
     // If job is closed, reject all pending/reviewed applications
     if (parsed.status === 'closed') {
@@ -465,6 +472,18 @@ exports.updateJob = async (req, res) => {
         name: updatedJob.companyId.name
       }
     });
+
+    const statusChanged = previousStatus !== updatedJob.status;
+
+    if (statusChanged && parsed.status === 'approved') {
+      const companyUserId = updatedJob.companyId?.userId;
+
+      notificationService
+        .notifyJobApproved(companyUserId, { jobTitle: updatedJob.title || 'Job Posting' })
+        .catch((error) => {
+          console.error('Notification error (job approved):', error);
+        });
+    }
   } catch (error) {
     if (error.name === 'ZodError') {
       return res.status(400).json({ error: error.issues[0].message });

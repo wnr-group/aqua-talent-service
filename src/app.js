@@ -17,8 +17,8 @@ const notificationRoutes = require('./routes/notificationRoutes');
 if (!process.env.ADMIN_EMAIL) {
   console.warn('[WARNING] ADMIN_EMAIL environment variable is not set. Admin password reset will not work.');
 }
-if (!process.env.FRONTEND_URL) {
-  console.warn('[WARNING] FRONTEND_URL environment variable is not set. Password reset links will use default localhost URL.');
+if (!process.env.FRONTEND_URL && !process.env.FRONTEND_BASE_URL && !process.env.APP_BASE_URL) {
+  console.warn('[WARNING] FRONTEND_URL/FRONTEND_BASE_URL/APP_BASE_URL environment variables are not set. Password reset links will use default localhost URL.');
 }
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
