@@ -499,7 +499,7 @@ exports.getApplications = async (req, res) => {
     const { status, search, jobType, location, page = 1, limit = 10 } = req.query;
 
     if (status && !APPLICATION_STATUSES.includes(status)) {
-      return res.status(400).json({ error: 'Status must be pending, reviewed, hired, rejected, or withdrawn' });
+      return res.status(400).json({ error: `Status must be one of: ${APPLICATION_STATUSES.join(', ')}` });
     }
 
     if (jobType && !JOB_TYPES.includes(jobType)) {
@@ -764,9 +764,11 @@ exports.updateApplication = async (req, res) => {
     if (parsed.status === 'reviewed') {
       updateFields.reviewedAt = new Date();
       updateFields.rejectionReason = null;
+      updateFields.rejectionSource = null;
     } else if (parsed.status === 'rejected') {
       // Don't set reviewedAt when admin rejects - this keeps it hidden from companies
       updateFields.rejectionReason = parsed.rejectionReason || null;
+      updateFields.rejectionSource = 'admin';
     }
 
     const updatedApp = await Application.findByIdAndUpdate(

@@ -21,6 +21,25 @@ const ApplicationSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  rejectionSource: {
+    type: String,
+    enum: ['admin', 'company'],
+    default: null
+  },
+  interviewDate: {
+    type: Date,
+    default: null
+  },
+  interviewNotes: {
+    type: String,
+    maxlength: 2000,
+    default: null
+  },
+  offerDetails: {
+    type: String,
+    maxlength: 2000,
+    default: null
+  },
   createdAt: {
     type: Date,
     default: Date.now

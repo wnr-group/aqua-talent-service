@@ -56,7 +56,20 @@ const canApply = async (studentId) => {
   };
 };
 
+/**
+ * Business rule: withdrawal is not permitted at any stage after a student has applied.
+ * Returns an object so callers can inspect the reason without catching exceptions.
+ */
+const validateWithdrawal = (application) => {
+  // Withdrawal is unconditionally disallowed once an application exists.
+  return {
+    allowed: false,
+    message: 'Application withdrawal is not allowed after applying.'
+  };
+};
+
 module.exports = {
   getActiveApplicationCount,
+  validateWithdrawal,
   canApply
 };

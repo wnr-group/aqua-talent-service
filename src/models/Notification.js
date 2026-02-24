@@ -4,6 +4,8 @@ const NOTIFICATION_TYPES = [
   'application_submitted',
   'application_approved',
   'application_rejected',
+  'application_interview_scheduled',
+  'application_offer_extended',
   'application_hired',
   'application_received',
   'job_approved',

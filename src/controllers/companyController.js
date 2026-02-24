@@ -1,4 +1,10 @@
 const mongoose = require('mongoose');
+const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc');
+const timezone = require('dayjs/plugin/timezone');
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 const Company = require('../models/Company');
 const JobPosting = require('../models/JobPosting');
@@ -41,9 +47,62 @@ const isEmailTakenByOther = async (email, currentCompanyId) => {
   return false;
 };
 
-const VISIBLE_APPLICATION_STATUSES = ['reviewed', 'hired', 'rejected'];
+const VISIBLE_APPLICATION_STATUSES = ['reviewed', 'interview_scheduled', 'offer_extended', 'hired', 'rejected'];
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const hasExplicitTimezoneInfo = (value) => /(?:z|[+-]\d{2}:?\d{2})$/i.test(String(value || '').trim());
+
+const isValidIanaTimezone = (value) => {
+  if (typeof value !== 'string' || !value.trim()) {
+    return false;
+  }
+
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value.trim() });
+    return true;
+  } catch (error) {
+    return false;
+  }
+};
+
+const convertInterviewDateToUtc = ({ interviewDateInput, interviewTimeZone }) => {
+  if (interviewDateInput === undefined || interviewDateInput === null || interviewDateInput === '') {
+    return { utcDate: null, error: null };
+  }
+
+  if (typeof interviewDateInput !== 'string') {
+    return { utcDate: null, error: 'interviewDate must be a string' };
+  }
+
+  const rawInterviewDate = interviewDateInput.trim();
+  if (!rawInterviewDate) {
+    return { utcDate: null, error: 'interviewDate must be a valid date-time value' };
+  }
+
+  let parsedDate;
+
+  if (hasExplicitTimezoneInfo(rawInterviewDate)) {
+    parsedDate = dayjs(rawInterviewDate);
+  } else {
+    if (!interviewTimeZone) {
+      return { utcDate: null, error: 'interviewTimeZone is required when interviewDate has no timezone offset' };
+    }
+
+    if (!isValidIanaTimezone(interviewTimeZone)) {
+      return { utcDate: null, error: 'interviewTimeZone must be a valid IANA timezone (e.g. Asia/Kolkata)' };
+    }
+
+    parsedDate = dayjs.tz(rawInterviewDate, interviewTimeZone.trim());
+  }
+
+  if (!parsedDate.isValid()) {
+    return { utcDate: null, error: 'interviewDate must be a valid date-time value' };
+  }
+
+  const utcIso = parsedDate.utc().toISOString();
+  return { utcDate: new Date(utcIso), error: null };
+};
 
 exports.getDashboard = async (req, res) => {
   try {
@@ -611,7 +670,7 @@ exports.getJobApplications = async (req, res) => {
     }
 
     if (status && !VISIBLE_APPLICATION_STATUSES.includes(status)) {
-      return res.status(400).json({ error: 'Status must be reviewed, hired, or rejected' });
+      return res.status(400).json({ error: 'Status must be reviewed, interview_scheduled, offer_extended, hired, or rejected' });
     }
 
     const pageNum = Math.max(1, parseInt(page) || 1);
@@ -699,7 +758,7 @@ exports.getAllApplications = async (req, res) => {
     }
 
     if (status && !VISIBLE_APPLICATION_STATUSES.includes(status)) {
-      return res.status(400).json({ error: 'Status must be reviewed, hired, or rejected' });
+      return res.status(400).json({ error: 'Status must be reviewed, interview_scheduled, offer_extended, hired, or rejected' });
     }
 
     if (jobType && !JOB_TYPES.includes(jobType)) {
@@ -931,10 +990,47 @@ exports.getPublicProfile = async (req, res) => {
 exports.updateApplication = async (req, res) => {
   try {
     const { appId } = req.params;
-    const { status } = req.body;
+    const { status, rejectionReason, interviewDate, interviewTimeZone, interviewNotes, offerDetails } = req.body;
 
-    if (!['hired', 'rejected'].includes(status)) {
-      return res.status(400).json({ error: "Status must be 'hired' or 'rejected'" });
+    if (!['interview_scheduled', 'offer_extended', 'hired', 'rejected'].includes(status)) {
+      return res.status(400).json({ error: "Status must be 'interview_scheduled', 'offer_extended', 'hired', or 'rejected'" });
+    }
+
+    const normalizeOptionalText = (value) => {
+      if (value === undefined || value === null) {
+        return null;
+      }
+
+      if (typeof value !== 'string') {
+        return null;
+      }
+
+      const trimmed = value.trim();
+      return trimmed.length ? trimmed : null;
+    };
+
+    const normalizedInterviewNotes = normalizeOptionalText(interviewNotes);
+    const normalizedOfferDetails = normalizeOptionalText(offerDetails);
+
+    if (interviewNotes !== undefined && typeof interviewNotes !== 'string') {
+      return res.status(400).json({ error: 'interviewNotes must be a string' });
+    }
+
+    if (offerDetails !== undefined && typeof offerDetails !== 'string') {
+      return res.status(400).json({ error: 'offerDetails must be a string' });
+    }
+
+    if (interviewTimeZone !== undefined && interviewTimeZone !== null && typeof interviewTimeZone !== 'string') {
+      return res.status(400).json({ error: 'interviewTimeZone must be a string' });
+    }
+
+    const { utcDate: normalizedInterviewDate, error: interviewDateError } = convertInterviewDateToUtc({
+      interviewDateInput: interviewDate,
+      interviewTimeZone
+    });
+
+    if (interviewDateError) {
+      return res.status(400).json({ error: interviewDateError });
     }
 
     if (!mongoose.Types.ObjectId.isValid(appId)) {
@@ -957,7 +1053,15 @@ exports.updateApplication = async (req, res) => {
       return res.status(403).json({ error: 'You can only manage applications for your own jobs' });
     }
 
-    if (application.status !== 'reviewed') {
+    const allowedTransitions = {
+      reviewed: ['interview_scheduled', 'rejected'],
+      interview_scheduled: ['offer_extended', 'rejected'],
+      offer_extended: ['hired', 'rejected']
+    };
+
+    const allowedNextStatuses = allowedTransitions[application.status] || [];
+
+    if (!allowedNextStatuses.includes(status)) {
       if (application.status === 'pending') {
         return res.status(400).json({ error: 'Can only hire/reject applications that have been reviewed by admin' });
       }
@@ -967,11 +1071,33 @@ exports.updateApplication = async (req, res) => {
       if (application.status === 'withdrawn') {
         return res.status(400).json({ error: 'Cannot process withdrawn applications' });
       }
+
+      return res.status(400).json({ error: `Invalid transition from ${application.status} to ${status}` });
     }
 
     // Update application status
     application.status = status;
     application.reviewedAt = new Date();
+
+    if (status === 'interview_scheduled') {
+      application.interviewDate = normalizedInterviewDate;
+      application.interviewNotes = normalizedInterviewNotes;
+      application.offerDetails = null;
+      application.rejectionReason = null;
+      application.rejectionSource = null;
+    } else if (status === 'offer_extended') {
+      application.offerDetails = normalizedOfferDetails;
+      application.rejectionReason = null;
+      application.rejectionSource = null;
+    } else if (status === 'rejected') {
+      application.rejectionReason = (typeof rejectionReason === 'string' && rejectionReason.trim().length > 0)
+        ? rejectionReason.trim()
+        : null;
+      application.rejectionSource = 'company';
+    } else {
+      application.rejectionReason = null;
+      application.rejectionSource = null;
+    }
     await application.save();
 
     // If hired, update student's isHired flag
@@ -987,6 +1113,34 @@ exports.updateApplication = async (req, res) => {
       .populate('jobPostingId', 'title');
 
     res.json(updatedApp);
+
+    if (status === 'interview_scheduled') {
+      notificationService
+        .notifyApplicationInterviewScheduled(updatedApp.studentId.userId, {
+          jobTitle: updatedApp.jobPostingId.title,
+          companyName: company.name,
+          interviewDate: updatedApp.interviewDate
+        })
+        .catch((err) => console.error('Notification error (interview scheduled):', err));
+    }
+
+    if (status === 'offer_extended') {
+      notificationService
+        .notifyApplicationOfferExtended(updatedApp.studentId.userId, {
+          jobTitle: updatedApp.jobPostingId.title,
+          companyName: company.name
+        })
+        .catch((err) => console.error('Notification error (offer extended):', err));
+    }
+
+    if (status === 'rejected') {
+      notificationService
+        .notifyApplicationRejected(updatedApp.studentId.userId, {
+          jobTitle: updatedApp.jobPostingId.title,
+          companyName: company.name
+        })
+        .catch((err) => console.error('Notification error (company rejected):', err));
+    }
 
     if (status === 'hired') {
       emailService

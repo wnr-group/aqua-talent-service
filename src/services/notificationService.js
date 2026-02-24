@@ -82,6 +82,49 @@ const notifyApplicationRejected = (studentUserId, { jobTitle, companyName, reaso
   });
 };
 
+const formatInterviewDateTime = (value) => {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  const formatted = new Intl.DateTimeFormat('en-US', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZone: 'UTC'
+  }).format(date);
+
+  return `${formatted} UTC`;
+};
+
+const notifyApplicationInterviewScheduled = (studentUserId, { jobTitle, companyName, interviewDate }) => {
+  const interviewDateTime = formatInterviewDateTime(interviewDate);
+  const interviewSuffix = interviewDateTime ? ` Interview: ${interviewDateTime}.` : '';
+
+  return createNotification({
+    recipientId: studentUserId,
+    recipientType: 'student',
+    type: 'application_interview_scheduled',
+    title: 'Interview scheduled',
+    message: `Great news! An interview has been scheduled for "${jobTitle}" at ${companyName}.${interviewSuffix}`,
+    link: `/my-applications`
+  });
+};
+
+const notifyApplicationOfferExtended = (studentUserId, { jobTitle, companyName }) =>
+  createNotification({
+    recipientId: studentUserId,
+    recipientType: 'student',
+    type: 'application_offer_extended',
+    title: 'Offer extended',
+    message: `You have received an offer for "${jobTitle}" at ${companyName}. Check your email for details.`,
+    link: `/my-applications`
+  });
+
 /**
  * Student: company hired them.
  */
@@ -252,6 +295,8 @@ module.exports = {
   notifyApplicationSubmitted,
   notifyApplicationApproved,
   notifyApplicationRejected,
+  notifyApplicationInterviewScheduled,
+  notifyApplicationOfferExtended,
   notifyApplicationHired,
   notifyApplicationReceived,
   notifyJobApproved,
