@@ -6,7 +6,6 @@ const JobPosting = require('../models/JobPosting');
 const Application = require('../models/Application');
 const { STUDENT_APPLICATION_STATUS_MAP } = require('../constants');
 const { getApplicationLimit } = require('../services/subscriptionService');
-const { validateWithdrawal } = require('../services/applicationService');
 const { uploadStudentResume } = require('../services/mediaService');
 const emailService = require('../services/emailService');
 const notificationService = require('../services/notificationService');
@@ -431,7 +430,8 @@ exports.applyToJob = async (req, res) => {
       status: { $nin: ['withdrawn', 'rejected'] }
     });
 
-    if (student.subscriptionTier !== 'paid' && activeApplications >= 2) {
+    const applicationLimit = await getApplicationLimit(student._id);
+    if (applicationLimit !== Infinity && activeApplications >= applicationLimit) {
       return res.status(403).json({ error: 'Application limit reached' });
     }
 
@@ -496,7 +496,14 @@ exports.applyToJob = async (req, res) => {
       })
       .catch((err) => console.error('Notification error (submitted):', err));
 
-    // Company notification is sent after admin approval, not on submission
+    // Notify admins about the new application
+    notificationService
+      .notifyAdminsNewApplication({
+        studentName: student.fullName,
+        jobTitle: _jobTitle,
+        applicationId: application._id.toString()
+      })
+      .catch((err) => console.error('Notification error (admin new application):', err));
 
     emailService
       .sendApplicationStatusEmail(
@@ -571,7 +578,8 @@ exports.withdrawApplication = async (req, res) => {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    const application = await Application.findById(appId);
+    const application = await Application.findById(appId)
+      .populate({ path: 'jobPostingId', select: 'title' });
 
     if (!application) {
       return res.status(404).json({ error: 'Application not found' });
@@ -581,16 +589,32 @@ exports.withdrawApplication = async (req, res) => {
       return res.status(403).json({ error: 'You can only withdraw your own applications' });
     }
 
-    // Service-layer business rule: withdrawal is disallowed at every stage.
-    const withdrawalCheck = validateWithdrawal(application);
-    if (!withdrawalCheck.allowed) {
-      return res.status(403).json({ error: withdrawalCheck.message });
+    if (application.status !== 'pending') {
+      const messages = {
+        reviewed: 'Cannot withdraw after admin has approved your application',
+        hired: 'Cannot withdraw after being hired',
+        withdrawn: 'Application already withdrawn',
+        rejected: 'Cannot withdraw a rejected application'
+      };
+
+      const message = messages[application.status] || 'Application cannot be withdrawn at this stage';
+      return res.status(400).json({ error: message });
     }
 
     application.status = 'withdrawn';
     await application.save();
 
     res.json(application);
+
+    // Notify admins about the withdrawal (fire-and-forget, does not affect response).
+    // Only reached on successful withdrawal — blocked requests return 400 above.
+    notificationService
+      .notifyAdminsApplicationWithdrawn({
+        studentName: student.fullName,
+        jobTitle: application.jobPostingId?.title || 'Unknown Job',
+        applicationId: application._id.toString()
+      })
+      .catch((err) => console.error('Notification error (application withdrawn):', err));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
@@ -614,6 +638,7 @@ exports.getProfile = async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 };
+
 
 exports.updateProfile = async (req, res) => {
   try {
