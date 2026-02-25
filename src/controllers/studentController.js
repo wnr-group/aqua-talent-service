@@ -430,7 +430,8 @@ exports.applyToJob = async (req, res) => {
       status: { $nin: ['withdrawn', 'rejected'] }
     });
 
-    if (student.subscriptionTier !== 'paid' && activeApplications >= 2) {
+    const applicationLimit = await getApplicationLimit(student._id);
+    if (applicationLimit !== Infinity && activeApplications >= applicationLimit) {
       return res.status(403).json({ error: 'Application limit reached' });
     }
 

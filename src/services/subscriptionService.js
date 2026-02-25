@@ -88,20 +88,18 @@ const checkSubscriptionStatus = async (studentId) => {
 const getApplicationLimit = async (studentId) => {
   const student = await Student.findById(studentId);
 
-  if (student?.subscriptionTier === 'paid') {
-    // Check if paid subscription has a limit
-    if (student.currentSubscriptionId) {
-      const subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
-        .populate('serviceId', 'maxApplications');
+  // Check subscription's maxApplications (works for both free and paid tiers)
+  if (student?.currentSubscriptionId) {
+    const subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
+      .populate('serviceId', 'maxApplications');
 
-      if (subscription?.serviceId?.maxApplications) {
-        return subscription.serviceId.maxApplications;
-      }
+    if (subscription?.serviceId?.maxApplications) {
+      return subscription.serviceId.maxApplications;
     }
-    return Infinity;
   }
 
-  return getFreeTierMaxApplications();
+  // No maxApplications set means unlimited
+  return Infinity;
 };
 
 const isSubscriptionActive = async (studentId) => {
