@@ -57,15 +57,21 @@ const canApply = async (studentId) => {
 };
 
 /**
- * Business rule: withdrawal is not permitted at any stage after a student has applied.
- * Returns an object so callers can inspect the reason without catching exceptions.
+ * Business rule: a student may request withdrawal when their application is
+ * in `pending` or `reviewed` (shortlisted) state.  For every other status the
+ * request is denied so callers can surface a useful error without throwing.
  */
 const validateWithdrawal = (application) => {
-  // Withdrawal is unconditionally disallowed once an application exists.
-  return {
-    allowed: false,
-    message: 'Application withdrawal is not allowed after applying.'
-  };
+  const allowedStatuses = ['pending', 'reviewed'];
+
+  if (!allowedStatuses.includes(application.status)) {
+    return {
+      allowed: false,
+      message: `Withdrawal request is not allowed for applications with status '${application.status}'.`
+    };
+  }
+
+  return { allowed: true };
 };
 
 module.exports = {

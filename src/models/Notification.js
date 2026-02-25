@@ -13,7 +13,12 @@ const NOTIFICATION_TYPES = [
   'company_rejected',
   'ADMIN_NEW_COMPANY_PENDING',
   'ADMIN_NEW_JOB_PENDING',
-  'ADMIN_COMPANY_REVERIFY_REQUIRED'
+  'ADMIN_COMPANY_REVERIFY_REQUIRED',
+  'ADMIN_NEW_APPLICATION',
+  'withdrawal_requested',
+  'withdrawal_approved',
+  'withdrawal_rejected',
+  'APPLICATION_WITHDRAWN'
 ];
 
 const RECIPIENT_TYPES = ['student', 'company', 'admin'];

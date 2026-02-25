@@ -288,6 +288,127 @@ const notifyAdminsCompanyReverifyRequired = async ({ companyId, companyName }) =
   }
 };
 
+/**
+ * Admin: a student submitted a new application.
+ */
+const notifyAdminsNewApplication = async ({ studentName, jobTitle, applicationId }) => {
+  try {
+    const adminIds = await getAdminUserIds();
+    if (!adminIds.length) {
+      return [];
+    }
+
+    return Promise.all(
+      adminIds.map((adminId) =>
+        createNotification({
+          recipientId: adminId,
+          recipientType: 'admin',
+          type: 'ADMIN_NEW_APPLICATION',
+          title: 'New Student Application',
+          message: `${studentName} applied for "${jobTitle}". Application ID: ${applicationId}.`,
+          link: `/admin/applications`
+        })
+      )
+    );
+  } catch (error) {
+    console.error('[notificationService] Failed admin notification for new application', {
+      error: error.message,
+      applicationId
+    });
+    return [];
+  }
+};
+
+/**
+ * Admin: a student has requested withdrawal of their application.
+ */
+const notifyAdminsWithdrawalRequested = async ({ studentName, jobTitle, applicationId }) => {
+  try {
+    const adminIds = await getAdminUserIds();
+    if (!adminIds.length) {
+      return [];
+    }
+
+    return Promise.all(
+      adminIds.map((adminId) =>
+        createNotification({
+          recipientId: adminId,
+          recipientType: 'admin',
+          type: 'withdrawal_requested',
+          title: 'Withdrawal Request',
+          message: `${studentName} has requested to withdraw their application for "${jobTitle}". Application ID: ${applicationId}.`,
+          link: `/admin/applications`
+        })
+      )
+    );
+  } catch (error) {
+    console.error('[notificationService] Failed admin notification for withdrawal request', {
+      error: error.message,
+      applicationId
+    });
+    return [];
+  }
+};
+
+/**
+ * Student: their withdrawal request was approved by admin.
+ */
+const notifyWithdrawalApproved = (studentUserId, { jobTitle, companyName }) =>
+  createNotification({
+    recipientId: studentUserId,
+    recipientType: 'student',
+    type: 'withdrawal_approved',
+    title: 'Withdrawal approved',
+    message: `Your withdrawal request for "${jobTitle}" at ${companyName} has been approved.`,
+    link: `/my-applications`
+  });
+
+/**
+ * Student: their withdrawal request was rejected by admin.
+ */
+const notifyWithdrawalRejected = (studentUserId, { jobTitle, companyName }) =>
+  createNotification({
+    recipientId: studentUserId,
+    recipientType: 'student',
+    type: 'withdrawal_rejected',
+    title: 'Withdrawal rejected',
+    message: `Your withdrawal request for "${jobTitle}" at ${companyName} has been rejected. Your application has been restored.`,
+    link: `/my-applications`
+  });
+
+// ─── Exports ───────────────────────────────────────────────────────────────
+
+/**
+ * Admin: a student withdrew their application.
+ */
+const notifyAdminsApplicationWithdrawn = async ({ studentName, jobTitle, applicationId }) => {
+  try {
+    const adminIds = await getAdminUserIds();
+    if (!adminIds.length) {
+      return [];
+    }
+
+    return Promise.all(
+      adminIds.map((adminId) =>
+        createNotification({
+          recipientId: adminId,
+          recipientType: 'admin',
+          type: 'APPLICATION_WITHDRAWN',
+          title: 'Application Withdrawn',
+          message: `${studentName} has withdrawn their application for "${jobTitle}".`,
+          link: `/admin/applications`
+        })
+      )
+    );
+  } catch (error) {
+    console.error('[notificationService] Failed admin notification for application withdrawal', {
+      error: error.message,
+      applicationId
+    });
+    return [];
+  }
+};
+
 // ─── Exports ───────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -304,5 +425,10 @@ module.exports = {
   notifyCompanyRejected,
   notifyAdminsNewCompanyPending,
   notifyAdminsNewJobPending,
-  notifyAdminsCompanyReverifyRequired
+  notifyAdminsCompanyReverifyRequired,
+  notifyAdminsNewApplication,
+  notifyAdminsWithdrawalRequested,
+  notifyWithdrawalApproved,
+  notifyWithdrawalRejected,
+  notifyAdminsApplicationWithdrawn
 };
