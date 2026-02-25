@@ -1,5 +1,10 @@
 require('dotenv').config();
 
+if (process.env.NODE_ENV === 'production') {
+  console.error('❌ Seed script cannot be executed in production environment.');
+  process.exit(1);
+}
+
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 
