@@ -44,7 +44,8 @@ const JOB_TYPES = [
   'Part-time',
   'Contract',
   'Internship',
-  'Freelance'
+  'Freelance',
+  'Project'
 ];
 
 const SUBSCRIPTION_STATUSES = ['active', 'expired', 'cancelled', 'pending'];
