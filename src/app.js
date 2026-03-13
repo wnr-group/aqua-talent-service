@@ -12,6 +12,8 @@ const publicCompanyRoutes = require('./routes/publicCompanyRoutes');
 const unsubscribeRoutes = require('./routes/unsubscribeRoutes');
 const mediaRoutes = require('./routes/mediaRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
+const paymentRoutes = require('./routes/paymentRoutes');
+const paymentController = require('./controllers/paymentController');
 
 // Password reset environment warnings
 if (!process.env.ADMIN_EMAIL) {
@@ -32,7 +34,20 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buffer) => {
+    if (!buffer?.length) {
+      return;
+    }
+
+    if (
+      req.originalUrl === '/api/webhooks/razorpay'
+      || req.originalUrl === '/api/payments/webhooks/razorpay'
+    ) {
+      req.rawBody = buffer.toString('utf8');
+    }
+  }
+}));
 
 
 app.use('/api/auth', authRoutes);
@@ -43,6 +58,9 @@ app.use('/api/services', serviceRoutes);
 app.use('/api/companies', publicCompanyRoutes);
 app.use('/api/media', mediaRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/payments', paymentRoutes);
+app.post('/api/webhooks/razorpay', paymentController.handleWebhook);
+app.get('/api/geo-location', paymentController.getGeoLocation);
 app.use('/', unsubscribeRoutes);
 
 import('./routes/testMailRoutes.mjs')

@@ -28,6 +28,56 @@ const AvailableServiceSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
+  priceINR: {
+    type: Number,
+    required: true,
+    min: 0,
+    default: function() {
+      return typeof this.price === 'number' ? this.price : 0;
+    }
+  },
+  priceUSD: {
+    type: Number,
+    required: true,
+    min: 0,
+    default: function() {
+      const usdFallbacks = [
+        this.usdPrice,
+        this.nonIndianPrice,
+        this.internationalPrice,
+        this.non_indian_price,
+        this.international_price,
+        this.price
+      ];
+
+      return usdFallbacks.find((value) => typeof value === 'number') ?? 0;
+    }
+  },
+  nonIndianPrice: {
+    type: Number,
+    default: null,
+    min: 0
+  },
+  internationalPrice: {
+    type: Number,
+    default: null,
+    min: 0
+  },
+  usdPrice: {
+    type: Number,
+    default: null,
+    min: 0
+  },
+  non_indian_price: {
+    type: Number,
+    default: null,
+    min: 0
+  },
+  international_price: {
+    type: Number,
+    default: null,
+    min: 0
+  },
   currency: {
     type: String,
     default: 'USD',
@@ -82,6 +132,10 @@ const AvailableServiceSchema = new mongoose.Schema({
     default: false
   },
   applicationHighlight: {
+    type: Boolean,
+    default: false
+  },
+  isCompanySpotlight: {
     type: Boolean,
     default: false
   },

@@ -26,6 +26,57 @@ const {
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+const getIncomingNonIndianPrice = (payload = {}) => {
+  const candidateKeys = [
+    'nonIndianPrice',
+    'internationalPrice',
+    'usdPrice',
+    'non_indian_price',
+    'international_price'
+  ];
+
+  for (const key of candidateKeys) {
+    if (payload[key] !== undefined) {
+      return payload[key];
+    }
+  }
+
+  return undefined;
+};
+
+const getPlanNonIndianPrice = (plan) => (
+  plan.nonIndianPrice
+  ?? plan.internationalPrice
+  ?? plan.usdPrice
+  ?? plan.non_indian_price
+  ?? plan.international_price
+  ?? null
+);
+
+const buildSubscriptionPlanResponse = (plan) => ({
+  id: plan._id,
+  name: plan.name,
+  description: plan.description,
+  maxApplications: plan.maxApplications,
+  price: plan.price,
+  nonIndianPrice: getPlanNonIndianPrice(plan),
+  currency: plan.currency,
+  billingCycle: plan.billingCycle,
+  trialDays: plan.trialDays,
+  discount: plan.discount,
+  features: plan.features,
+  badge: plan.badge,
+  displayOrder: plan.displayOrder,
+  resumeDownloadsPerMonth: plan.resumeDownloadsPerMonth,
+  videoViewsPerMonth: plan.videoViewsPerMonth,
+  prioritySupport: plan.prioritySupport,
+  profileBoost: plan.profileBoost,
+  applicationHighlight: plan.applicationHighlight,
+  isActive: plan.isActive,
+  createdAt: plan.createdAt,
+  updatedAt: plan.updatedAt
+});
+
 exports.getDashboard = async (req, res) => {
   try {
     const companyStats = await Company.aggregate([
@@ -1273,28 +1324,7 @@ exports.getSubscriptionPlans = async (req, res) => {
     const plans = await AvailableService.find(filter).sort({ displayOrder: 1, createdAt: -1 });
 
     res.json({
-      plans: plans.map(plan => ({
-        id: plan._id,
-        name: plan.name,
-        description: plan.description,
-        maxApplications: plan.maxApplications,
-        price: plan.price,
-        currency: plan.currency,
-        billingCycle: plan.billingCycle,
-        trialDays: plan.trialDays,
-        discount: plan.discount,
-        features: plan.features,
-        badge: plan.badge,
-        displayOrder: plan.displayOrder,
-        resumeDownloadsPerMonth: plan.resumeDownloadsPerMonth,
-        videoViewsPerMonth: plan.videoViewsPerMonth,
-        prioritySupport: plan.prioritySupport,
-        profileBoost: plan.profileBoost,
-        applicationHighlight: plan.applicationHighlight,
-        isActive: plan.isActive,
-        createdAt: plan.createdAt,
-        updatedAt: plan.updatedAt
-      }))
+      plans: plans.map(buildSubscriptionPlanResponse)
     });
   } catch (error) {
     console.error(error);
@@ -1316,28 +1346,7 @@ exports.getSubscriptionPlan = async (req, res) => {
       return res.status(404).json({ error: 'Subscription plan not found' });
     }
 
-    res.json({
-      id: plan._id,
-      name: plan.name,
-      description: plan.description,
-      maxApplications: plan.maxApplications,
-      price: plan.price,
-      currency: plan.currency,
-      billingCycle: plan.billingCycle,
-      trialDays: plan.trialDays,
-      discount: plan.discount,
-      features: plan.features,
-      badge: plan.badge,
-      displayOrder: plan.displayOrder,
-      resumeDownloadsPerMonth: plan.resumeDownloadsPerMonth,
-      videoViewsPerMonth: plan.videoViewsPerMonth,
-      prioritySupport: plan.prioritySupport,
-      profileBoost: plan.profileBoost,
-      applicationHighlight: plan.applicationHighlight,
-      isActive: plan.isActive,
-      createdAt: plan.createdAt,
-      updatedAt: plan.updatedAt
-    });
+    res.json(buildSubscriptionPlanResponse(plan));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
@@ -1365,6 +1374,7 @@ exports.createSubscriptionPlan = async (req, res) => {
       applicationHighlight,
       isActive
     } = req.body;
+    const nonIndianPrice = getIncomingNonIndianPrice(req.body);
 
     if (!name || name.trim().length < 2) {
       return res.status(400).json({ error: 'Name must be at least 2 characters' });
@@ -1376,6 +1386,10 @@ exports.createSubscriptionPlan = async (req, res) => {
 
     if (price === undefined || price < 0) {
       return res.status(400).json({ error: 'Price must be a non-negative number' });
+    }
+
+    if (nonIndianPrice !== undefined && nonIndianPrice !== null && nonIndianPrice < 0) {
+      return res.status(400).json({ error: 'Non-Indian price must be a non-negative number' });
     }
 
     if (currency && !CURRENCIES.includes(currency)) {
@@ -1391,6 +1405,8 @@ exports.createSubscriptionPlan = async (req, res) => {
       description: description.trim(),
       maxApplications: maxApplications || null,
       price,
+      nonIndianPrice: nonIndianPrice ?? null,
+      internationalPrice: nonIndianPrice ?? null,
       currency: currency || 'USD',
       billingCycle: billingCycle || 'monthly',
       trialDays: trialDays || 0,
@@ -1406,27 +1422,7 @@ exports.createSubscriptionPlan = async (req, res) => {
       isActive: isActive !== false
     });
 
-    res.status(201).json({
-      id: plan._id,
-      name: plan.name,
-      description: plan.description,
-      maxApplications: plan.maxApplications,
-      price: plan.price,
-      currency: plan.currency,
-      billingCycle: plan.billingCycle,
-      trialDays: plan.trialDays,
-      discount: plan.discount,
-      features: plan.features,
-      badge: plan.badge,
-      displayOrder: plan.displayOrder,
-      resumeDownloadsPerMonth: plan.resumeDownloadsPerMonth,
-      videoViewsPerMonth: plan.videoViewsPerMonth,
-      prioritySupport: plan.prioritySupport,
-      profileBoost: plan.profileBoost,
-      applicationHighlight: plan.applicationHighlight,
-      isActive: plan.isActive,
-      createdAt: plan.createdAt
-    });
+    res.status(201).json(buildSubscriptionPlanResponse(plan));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
@@ -1466,6 +1462,7 @@ exports.updateSubscriptionPlan = async (req, res) => {
       applicationHighlight,
       isActive
     } = req.body;
+    const nonIndianPrice = getIncomingNonIndianPrice(req.body);
 
     if (name !== undefined) {
       if (name.trim().length < 2) {
@@ -1486,6 +1483,15 @@ exports.updateSubscriptionPlan = async (req, res) => {
         return res.status(400).json({ error: 'Price must be a non-negative number' });
       }
       plan.price = price;
+    }
+
+    if (nonIndianPrice !== undefined) {
+      if (nonIndianPrice !== null && nonIndianPrice < 0) {
+        return res.status(400).json({ error: 'Non-Indian price must be a non-negative number' });
+      }
+
+      plan.nonIndianPrice = nonIndianPrice;
+      plan.internationalPrice = nonIndianPrice;
     }
 
     if (currency !== undefined) {
@@ -1517,28 +1523,7 @@ exports.updateSubscriptionPlan = async (req, res) => {
 
     await plan.save();
 
-    res.json({
-      id: plan._id,
-      name: plan.name,
-      description: plan.description,
-      maxApplications: plan.maxApplications,
-      price: plan.price,
-      currency: plan.currency,
-      billingCycle: plan.billingCycle,
-      trialDays: plan.trialDays,
-      discount: plan.discount,
-      features: plan.features,
-      badge: plan.badge,
-      displayOrder: plan.displayOrder,
-      resumeDownloadsPerMonth: plan.resumeDownloadsPerMonth,
-      videoViewsPerMonth: plan.videoViewsPerMonth,
-      prioritySupport: plan.prioritySupport,
-      profileBoost: plan.profileBoost,
-      applicationHighlight: plan.applicationHighlight,
-      isActive: plan.isActive,
-      createdAt: plan.createdAt,
-      updatedAt: plan.updatedAt
-    });
+    res.json(buildSubscriptionPlanResponse(plan));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });

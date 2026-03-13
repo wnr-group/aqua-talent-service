@@ -4,6 +4,7 @@ const Student = require('../models/Student');
 const Application = require('../models/Application');
 const AvailableService = require('../models/AvailableService');
 const ActiveSubscription = require('../models/ActiveSubscription');
+const Company = require('../models/Company');
 const PaymentRecord = require('../models/PaymentRecord');
 const { checkSubscriptionStatus, getApplicationLimit } = require('../services/subscriptionService');
 const { getActiveApplicationCount } = require('../services/applicationService');
@@ -136,6 +137,100 @@ const calculateEndDate = (billingCycle, startDate = new Date()) => {
   }
 };
 
+const createOrUpgradeSubscriptionForStudent = async ({
+  student,
+  service,
+  autoRenew = false,
+  paymentMethod = 'manual',
+  currency = 'USD',
+  gatewayResponse = null,
+  companyId = null,
+  createPaymentRecord = true,
+  paymentAmount = null
+}) => {
+  if (!student) {
+    const error = new Error('Student not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (!service) {
+    const error = new Error('Subscription service not found. Please configure the Pro plan or provide a valid serviceId.');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (service.tier === 'free') {
+    const error = new Error('Cannot subscribe to free tier through this endpoint');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const now = new Date();
+  const endDate = calculateEndDate(service.billingCycle, now);
+  const shouldAutoRenew = service.billingCycle === 'one-time' ? false : Boolean(autoRenew);
+
+  if (student.currentSubscriptionId) {
+    const currentSub = await ActiveSubscription.findById(student.currentSubscriptionId)
+      .populate('serviceId', 'tier');
+
+    if (currentSub && currentSub.serviceId?.tier !== 'free') {
+      await ActiveSubscription.updateOne(
+        { _id: student.currentSubscriptionId, studentId: student._id, status: { $in: ['active', 'pending'] } },
+        { $set: { status: 'cancelled', autoRenew: false } }
+      );
+    }
+  }
+
+  const subscription = await ActiveSubscription.create({
+    studentId: student._id,
+    serviceId: service._id,
+    companyId,
+    startDate: now,
+    endDate,
+    status: 'active',
+    autoRenew: shouldAutoRenew
+  });
+
+  let paymentRecord = null;
+
+  if (createPaymentRecord) {
+    paymentRecord = await PaymentRecord.create({
+      studentId: student._id,
+      serviceId: service._id,
+      subscriptionId: subscription._id,
+      companyId,
+      amount: paymentAmount ?? service.price,
+      currency: String(currency || 'USD').toUpperCase(),
+      paymentDate: now,
+      status: 'completed',
+      transactionId: generateTransactionId(),
+      paymentMethod,
+      gatewayResponse
+    });
+  }
+
+  await Student.updateOne(
+    { _id: student._id },
+    {
+      $set: {
+        currentSubscriptionId: subscription._id,
+        subscriptionTier: service.tier === 'free' ? 'free' : 'paid'
+      }
+    }
+  );
+
+  const populatedSubscription = await ActiveSubscription.findById(subscription._id)
+    .populate('serviceId', 'name description maxApplications price features');
+
+  return {
+    subscription: populatedSubscription,
+    payment: paymentRecord
+  };
+};
+
+exports.createOrUpgradeSubscriptionForStudent = createOrUpgradeSubscriptionForStudent;
+
 exports.createOrUpgradeSubscription = async (req, res) => {
   try {
     const {
@@ -144,11 +239,16 @@ exports.createOrUpgradeSubscription = async (req, res) => {
       autoRenew = false,
       paymentMethod = 'manual',
       currency = 'USD',
-      gatewayResponse = null
+      gatewayResponse = null,
+      companyId = null
     } = req.body;
 
     if (serviceId && !mongoose.Types.ObjectId.isValid(serviceId)) {
       return res.status(400).json({ error: 'Invalid service ID format' });
+    }
+
+    if (companyId && !mongoose.Types.ObjectId.isValid(companyId)) {
+      return res.status(400).json({ error: 'Invalid company ID format' });
     }
 
     const student = await Student.findOne({ userId: req.user.userId });
@@ -169,71 +269,41 @@ exports.createOrUpgradeSubscription = async (req, res) => {
       return res.status(404).json({ error: 'Subscription service not found. Please configure the Pro plan or provide a valid serviceId.' });
     }
 
-    // Prevent subscribing to free tier via this endpoint
-    if (service.tier === 'free') {
-      return res.status(400).json({ error: 'Cannot subscribe to free tier through this endpoint' });
+    if (service.isCompanySpotlight && !companyId) {
+      return res.status(400).json({ error: 'companyId is required for spotlight subscriptions' });
     }
 
-    const now = new Date();
-    const endDate = calculateEndDate(service.billingCycle, now);
+    if (companyId) {
+      const companyExists = await Company.exists({ _id: companyId });
 
-    // One-time plans cannot auto-renew
-    const shouldAutoRenew = service.billingCycle === 'one-time' ? false : Boolean(autoRenew);
-
-    if (student.currentSubscriptionId) {
-      // Get current subscription to check if it's a free plan
-      const currentSub = await ActiveSubscription.findById(student.currentSubscriptionId)
-        .populate('serviceId', 'tier');
-
-      // Cancel current subscription if it's not a free tier
-      if (currentSub && currentSub.serviceId?.tier !== 'free') {
-        await ActiveSubscription.updateOne(
-          { _id: student.currentSubscriptionId, studentId: student._id, status: { $in: ['active', 'pending'] } },
-          { $set: { status: 'cancelled', autoRenew: false } }
-        );
+      if (!companyExists) {
+        return res.status(404).json({ error: 'Company not found' });
       }
     }
 
-    const subscription = await ActiveSubscription.create({
-      studentId: student._id,
-      serviceId: service._id,
-      startDate: now,
-      endDate,
-      status: 'active',
-      autoRenew: shouldAutoRenew
-    });
-
-    const paymentRecord = await PaymentRecord.create({
-      studentId: student._id,
-      subscriptionId: subscription._id,
-      amount: service.price,
-      currency: String(currency || 'USD').toUpperCase(),
-      paymentDate: now,
-      status: 'completed',
-      transactionId: generateTransactionId(),
+    const result = await createOrUpgradeSubscriptionForStudent({
+      student,
+      service,
+      autoRenew,
       paymentMethod,
-      gatewayResponse
+      currency,
+      gatewayResponse,
+      companyId,
+      createPaymentRecord: true,
+      paymentAmount: service.price
     });
-
-    await Student.updateOne(
-      { _id: student._id },
-      {
-        $set: {
-          currentSubscriptionId: subscription._id,
-          subscriptionTier: 'paid'
-        }
-      }
-    );
-
-    const populatedSubscription = await ActiveSubscription.findById(subscription._id)
-      .populate('serviceId', 'name description maxApplications price features');
 
     res.status(201).json({
-      subscription: populatedSubscription,
-      payment: paymentRecord
+      subscription: result.subscription,
+      payment: result.payment
     });
   } catch (error) {
     console.error(error);
+
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
+
     res.status(500).json({ error: 'Server error' });
   }
 };
