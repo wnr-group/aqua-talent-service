@@ -12,6 +12,11 @@ const ActiveSubscriptionSchema = new mongoose.Schema({
     ref: 'AvailableService',
     required: true
   },
+  companyId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Company',
+    default: null
+  },
   startDate: {
     type: Date,
     required: true,
@@ -38,5 +43,6 @@ const ActiveSubscriptionSchema = new mongoose.Schema({
 
 ActiveSubscriptionSchema.index({ studentId: 1, status: 1 });
 ActiveSubscriptionSchema.index({ studentId: 1, endDate: -1 });
+ActiveSubscriptionSchema.index({ companyId: 1, status: 1 });
 
 module.exports = mongoose.model('ActiveSubscription', ActiveSubscriptionSchema);

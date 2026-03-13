@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const PAYMENT_STATUSES = ['pending', 'completed', 'failed', 'refunded'];
+const PAYMENT_STATUSES = ['pending', 'paid', 'completed', 'failed', 'refunded'];
 
 const PaymentRecordSchema = new mongoose.Schema({
   studentId: {
@@ -8,10 +8,20 @@ const PaymentRecordSchema = new mongoose.Schema({
     ref: 'Student',
     required: true
   },
+  serviceId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'AvailableService',
+    default: null
+  },
   subscriptionId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'ActiveSubscription',
-    required: true
+    default: null
+  },
+  companyId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Company',
+    default: null
   },
   amount: {
     type: Number,
@@ -33,6 +43,20 @@ const PaymentRecordSchema = new mongoose.Schema({
     type: String,
     enum: PAYMENT_STATUSES,
     default: 'completed'
+  },
+  razorpayOrderId: {
+    type: String,
+    unique: true,
+    sparse: true,
+    trim: true,
+    default: null
+  },
+  razorpayPaymentId: {
+    type: String,
+    unique: true,
+    sparse: true,
+    trim: true,
+    default: null
   },
   transactionId: {
     type: String,
