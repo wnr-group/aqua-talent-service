@@ -53,8 +53,6 @@ const PaymentRecordSchema = new mongoose.Schema({
   },
   razorpayPaymentId: {
     type: String,
-    unique: true,
-    sparse: true,
     trim: true,
     default: null
   },
@@ -64,10 +62,15 @@ const PaymentRecordSchema = new mongoose.Schema({
     unique: true,
     trim: true
   },
+  paymentGateway: {
+    type: String,
+    trim: true,
+    default: 'razorpay' // The payment gateway used (razorpay, stripe, etc.)
+  },
   paymentMethod: {
     type: String,
-    required: true,
-    trim: true
+    trim: true,
+    default: null // The actual method used (upi, card, netbanking, wallet, etc.)
   },
   gatewayResponse: {
     type: mongoose.Schema.Types.Mixed,

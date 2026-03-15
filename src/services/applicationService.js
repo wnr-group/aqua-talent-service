@@ -1,14 +1,58 @@
 const Student = require('../models/Student');
-const Application = require('../models/Application');
+const ActiveSubscription = require('../models/ActiveSubscription');
 const { getApplicationLimit } = require('./subscriptionService');
 
-const NON_COUNTABLE_STATUSES = ['withdrawn', 'rejected'];
+const getSubscriptionUsage = async (studentId) => {
+  const student = await Student.findById(studentId);
 
-const getActiveApplicationCount = async (studentId) => {
-  return Application.countDocuments({
-    studentId,
-    status: { $nin: NON_COUNTABLE_STATUSES }
-  });
+  if (!student?.currentSubscriptionId) {
+    return { applicationsUsed: 0, subscription: null };
+  }
+
+  const subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
+    .populate('serviceId', 'maxApplications');
+
+  if (!subscription) {
+    return { applicationsUsed: 0, subscription: null };
+  }
+
+  return {
+    applicationsUsed: subscription.applicationsUsed || 0,
+    subscription
+  };
+};
+
+const incrementApplicationCount = async (studentId) => {
+  const student = await Student.findById(studentId);
+
+  if (!student?.currentSubscriptionId) {
+    return null;
+  }
+
+  const subscription = await ActiveSubscription.findByIdAndUpdate(
+    student.currentSubscriptionId,
+    { $inc: { applicationsUsed: 1 } },
+    { new: true }
+  );
+
+  return subscription;
+};
+
+const decrementApplicationCount = async (studentId) => {
+  const student = await Student.findById(studentId);
+
+  if (!student?.currentSubscriptionId) {
+    return null;
+  }
+
+  // Only decrement if applicationsUsed > 0
+  const subscription = await ActiveSubscription.findOneAndUpdate(
+    { _id: student.currentSubscriptionId, applicationsUsed: { $gt: 0 } },
+    { $inc: { applicationsUsed: -1 } },
+    { new: true }
+  );
+
+  return subscription;
 };
 
 const canApply = async (studentId) => {
@@ -29,16 +73,15 @@ const canApply = async (studentId) => {
   }
 
   const applicationLimit = await getApplicationLimit(studentId);
+  const { applicationsUsed } = await getSubscriptionUsage(studentId);
 
   if (applicationLimit === Infinity) {
     return {
       canApply: true,
-      applicationsUsed: await getActiveApplicationCount(studentId),
-      applicationLimit
+      applicationsUsed,
+      applicationLimit: null
     };
   }
-
-  const applicationsUsed = await getActiveApplicationCount(studentId);
 
   if (applicationsUsed >= applicationLimit) {
     return {
@@ -75,7 +118,9 @@ const validateWithdrawal = (application) => {
 };
 
 module.exports = {
-  getActiveApplicationCount,
+  getSubscriptionUsage,
+  incrementApplicationCount,
+  decrementApplicationCount,
   validateWithdrawal,
   canApply
 };

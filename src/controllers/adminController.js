@@ -61,14 +61,13 @@ const buildSubscriptionPlanResponse = (plan) => ({
   price: plan.price,
   nonIndianPrice: getPlanNonIndianPrice(plan),
   currency: plan.currency,
-  billingCycle: plan.billingCycle,
-  trialDays: plan.trialDays,
+  billingCycle: 'one-time',
   discount: plan.discount,
   features: plan.features,
   badge: plan.badge,
   displayOrder: plan.displayOrder,
-  resumeDownloadsPerMonth: plan.resumeDownloadsPerMonth,
-  videoViewsPerMonth: plan.videoViewsPerMonth,
+  resumeDownloads: plan.resumeDownloads,
+  videoViews: plan.videoViews,
   prioritySupport: plan.prioritySupport,
   profileBoost: plan.profileBoost,
   applicationHighlight: plan.applicationHighlight,
@@ -1203,7 +1202,7 @@ exports.getStudentProfile = async (req, res) => {
 exports.assignStudentSubscription = async (req, res) => {
   try {
     const { studentId } = req.params;
-    const { serviceId, endDate, autoRenew = false } = req.body;
+    const { serviceId } = req.body;
 
     if (!mongoose.Types.ObjectId.isValid(studentId)) {
       return res.status(400).json({ error: 'Invalid student ID format' });
@@ -1225,7 +1224,7 @@ exports.assignStudentSubscription = async (req, res) => {
       return res.status(404).json({ error: 'Subscription plan not found' });
     }
 
-    // Cancel current subscription if exists and is not free
+    // Mark current subscription as exhausted if exists and is not free
     if (student.currentSubscriptionId) {
       const currentSub = await ActiveSubscription.findById(student.currentSubscriptionId)
         .populate('serviceId', 'tier');
@@ -1233,46 +1232,22 @@ exports.assignStudentSubscription = async (req, res) => {
       if (currentSub && currentSub.serviceId?.tier !== 'free') {
         await ActiveSubscription.updateOne(
           { _id: student.currentSubscriptionId },
-          { $set: { status: 'cancelled', autoRenew: false } }
+          { $set: { status: 'exhausted', autoRenew: false } }
         );
       }
     }
 
-    // Calculate end date based on billing cycle
     const now = new Date();
-    let calculatedEndDate;
 
-    if (endDate) {
-      calculatedEndDate = new Date(endDate);
-    } else {
-      switch (service.billingCycle) {
-        case 'one-time':
-          calculatedEndDate = new Date('2099-12-31');
-          break;
-        case 'yearly':
-          calculatedEndDate = new Date(now);
-          calculatedEndDate.setFullYear(calculatedEndDate.getFullYear() + 1);
-          break;
-        case 'quarterly':
-          calculatedEndDate = new Date(now);
-          calculatedEndDate.setMonth(calculatedEndDate.getMonth() + 3);
-          break;
-        case 'monthly':
-        default:
-          calculatedEndDate = new Date(now);
-          calculatedEndDate.setMonth(calculatedEndDate.getMonth() + 1);
-          break;
-      }
-    }
-
-    // Create new subscription
+    // Create new quota-based subscription
     const subscription = await ActiveSubscription.create({
       studentId: student._id,
       serviceId: service._id,
       startDate: now,
-      endDate: calculatedEndDate,
+      endDate: null,
       status: 'active',
-      autoRenew: service.billingCycle === 'one-time' ? false : Boolean(autoRenew)
+      autoRenew: false,
+      applicationsUsed: 0
     });
 
     // Update student
@@ -1361,14 +1336,12 @@ exports.createSubscriptionPlan = async (req, res) => {
       maxApplications,
       price,
       currency,
-      billingCycle,
-      trialDays,
       discount,
       features,
       badge,
       displayOrder,
-      resumeDownloadsPerMonth,
-      videoViewsPerMonth,
+      resumeDownloads,
+      videoViews,
       prioritySupport,
       profileBoost,
       applicationHighlight,
@@ -1396,26 +1369,25 @@ exports.createSubscriptionPlan = async (req, res) => {
       return res.status(400).json({ error: `Currency must be one of: ${CURRENCIES.join(', ')}` });
     }
 
-    if (billingCycle && !BILLING_CYCLES.includes(billingCycle)) {
-      return res.status(400).json({ error: `Billing cycle must be one of: ${BILLING_CYCLES.join(', ')}` });
+    if (!maxApplications || maxApplications < 1) {
+      return res.status(400).json({ error: 'maxApplications is required and must be at least 1' });
     }
 
     const plan = await AvailableService.create({
       name: name.trim(),
       description: description.trim(),
-      maxApplications: maxApplications || null,
+      maxApplications,
       price,
       nonIndianPrice: nonIndianPrice ?? null,
       internationalPrice: nonIndianPrice ?? null,
       currency: currency || 'USD',
-      billingCycle: billingCycle || 'monthly',
-      trialDays: trialDays || 0,
+      billingCycle: 'one-time',
       discount: discount || 0,
       features: features || [],
       badge: badge?.trim() || null,
       displayOrder: displayOrder || 0,
-      resumeDownloadsPerMonth: resumeDownloadsPerMonth || null,
-      videoViewsPerMonth: videoViewsPerMonth || null,
+      resumeDownloads: resumeDownloads || null,
+      videoViews: videoViews || null,
       prioritySupport: prioritySupport || false,
       profileBoost: profileBoost || false,
       applicationHighlight: applicationHighlight || false,
@@ -1449,14 +1421,12 @@ exports.updateSubscriptionPlan = async (req, res) => {
       maxApplications,
       price,
       currency,
-      billingCycle,
-      trialDays,
       discount,
       features,
       badge,
       displayOrder,
-      resumeDownloadsPerMonth,
-      videoViewsPerMonth,
+      resumeDownloads,
+      videoViews,
       prioritySupport,
       profileBoost,
       applicationHighlight,
@@ -1501,21 +1471,18 @@ exports.updateSubscriptionPlan = async (req, res) => {
       plan.currency = currency;
     }
 
-    if (billingCycle !== undefined) {
-      if (!BILLING_CYCLES.includes(billingCycle)) {
-        return res.status(400).json({ error: `Billing cycle must be one of: ${BILLING_CYCLES.join(', ')}` });
+    if (maxApplications !== undefined) {
+      if (maxApplications !== null && maxApplications < 1) {
+        return res.status(400).json({ error: 'maxApplications must be at least 1' });
       }
-      plan.billingCycle = billingCycle;
+      plan.maxApplications = maxApplications;
     }
-
-    if (maxApplications !== undefined) plan.maxApplications = maxApplications || null;
-    if (trialDays !== undefined) plan.trialDays = trialDays;
     if (discount !== undefined) plan.discount = discount;
     if (features !== undefined) plan.features = features;
     if (badge !== undefined) plan.badge = badge?.trim() || null;
     if (displayOrder !== undefined) plan.displayOrder = displayOrder;
-    if (resumeDownloadsPerMonth !== undefined) plan.resumeDownloadsPerMonth = resumeDownloadsPerMonth || null;
-    if (videoViewsPerMonth !== undefined) plan.videoViewsPerMonth = videoViewsPerMonth || null;
+    if (resumeDownloads !== undefined) plan.resumeDownloads = resumeDownloads || null;
+    if (videoViews !== undefined) plan.videoViews = videoViews || null;
     if (prioritySupport !== undefined) plan.prioritySupport = prioritySupport;
     if (profileBoost !== undefined) plan.profileBoost = profileBoost;
     if (applicationHighlight !== undefined) plan.applicationHighlight = applicationHighlight;

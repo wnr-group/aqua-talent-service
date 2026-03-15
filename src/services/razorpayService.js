@@ -1,21 +1,13 @@
 const {
   getRazorpayClient,
-  getRazorpayCredentialDiagnostics,
   getRazorpayCredentials,
   getRazorpayKeyMode,
-  logRazorpayDebug,
-  RAZORPAY_CONFIG_ERROR_CODES,
-  validateRazorpayEnvironment
+  RAZORPAY_CONFIG_ERROR_CODES
 } = require('../config/razorpay');
 
-const getRazorpayInstance = () => getRazorpayClient();
-
 module.exports = {
-  getRazorpayInstance,
-  getRazorpayCredentialDiagnostics,
+  getRazorpayInstance: getRazorpayClient,
   getRazorpayCredentials,
   getRazorpayKeyMode,
-  logRazorpayDebug,
-  RAZORPAY_CONFIG_ERROR_CODES,
-  validateRazorpayEnvironment
+  RAZORPAY_CONFIG_ERROR_CODES
 };

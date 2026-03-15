@@ -8,12 +8,8 @@ const AvailableService = require('../models/AvailableService');
 const PaymentRecord = require('../models/PaymentRecord');
 const {
   getRazorpayInstance,
-  getRazorpayCredentialDiagnostics,
   getRazorpayCredentials,
-  getRazorpayKeyMode,
-  logRazorpayDebug,
-  RAZORPAY_CONFIG_ERROR_CODES,
-  validateRazorpayEnvironment
+  RAZORPAY_CONFIG_ERROR_CODES
 } = require('../services/razorpayService');
 const { createOrUpgradeSubscriptionForStudent } = require('./subscriptionController');
 
@@ -129,6 +125,8 @@ const isRazorpayConfigurationError = (error) => (
 const activateSubscriptionForPaymentRecord = async ({
   paymentRecord,
   razorpayPaymentId = null,
+  paymentMethod = null,
+  paymentDetails = {},
   source,
   eventName
 }) => {
@@ -141,13 +139,19 @@ const activateSubscriptionForPaymentRecord = async ({
 
   console.log('Payment captured for order:', paymentRecord.razorpayOrderId);
 
+  // Update payment method if provided
+  if (paymentMethod && !paymentRecord.paymentMethod) {
+    paymentRecord.paymentMethod = paymentMethod;
+  }
+
   if (paymentRecord.subscriptionId) {
     paymentRecord.razorpayPaymentId = razorpayPaymentId || paymentRecord.razorpayPaymentId;
     paymentRecord.status = 'completed';
     paymentRecord.gatewayResponse = mergeGatewayResponse(paymentRecord.gatewayResponse, {
       activationSource: source,
       activationEvent: eventName,
-      subscriptionActivatedAt: new Date().toISOString()
+      subscriptionActivatedAt: new Date().toISOString(),
+      ...paymentDetails
     });
 
     await paymentRecord.save();
@@ -187,17 +191,19 @@ const activateSubscriptionForPaymentRecord = async ({
     }
   }
 
+  // Create quota-based subscription
   const result = await createOrUpgradeSubscriptionForStudent({
     student,
     service,
-    autoRenew: false,
-    paymentMethod: 'razorpay',
+    paymentMethod: paymentRecord.paymentGateway || 'razorpay',
     currency: paymentRecord.currency,
     gatewayResponse: {
       source,
       event: eventName,
       razorpayOrderId: paymentRecord.razorpayOrderId,
-      razorpayPaymentId
+      razorpayPaymentId,
+      method: paymentMethod,
+      ...paymentDetails
     },
     companyId: paymentRecord.companyId,
     createPaymentRecord: false,
@@ -212,7 +218,8 @@ const activateSubscriptionForPaymentRecord = async ({
     activationSource: source,
     activationEvent: eventName,
     subscriptionActivatedAt: new Date().toISOString(),
-    subscriptionId: String(result.subscription._id)
+    subscriptionId: String(result.subscription._id),
+    ...paymentDetails
   });
 
   await paymentRecord.save();
@@ -250,39 +257,13 @@ exports.getGeoLocation = async (req, res) => {
 exports.createOrder = async (req, res) => {
   try {
     const amount = Number(req.body?.amount);
-    const diagnostics = getRazorpayCredentialDiagnostics();
-
-    logRazorpayDebug('Create order credential diagnostics', {
-      keyIdPresent: diagnostics.keyIdPresent,
-      keySecretPresent: diagnostics.keySecretPresent,
-      keySecretLength: diagnostics.keySecretLength,
-      keyMode: diagnostics.keyMode
-    });
-
-    const { keyId, keySecret } = validateRazorpayEnvironment();
+    const { keyId } = getRazorpayCredentials();
 
     if (!req.body?.serviceId && isValidAmount(amount)) {
       const razorpay = getRazorpayInstance();
-      const orderPayload = {
+      const order = await razorpay.orders.create({
         amount,
         currency: 'INR'
-      };
-
-      logRazorpayDebug('Creating direct order', {
-        keyIdPresent: Boolean(keyId),
-        keySecretPresent: Boolean(keySecret),
-        keySecretLength: keySecret.length,
-        keyMode: getRazorpayKeyMode(keyId),
-        payload: orderPayload
-      });
-
-      const order = await razorpay.orders.create(orderPayload);
-
-      logRazorpayDebug('Direct order created', {
-        orderId: order.id,
-        status: order.status,
-        amount: order.amount,
-        currency: order.currency
       });
 
       return res.status(201).json({
@@ -343,8 +324,54 @@ exports.createOrder = async (req, res) => {
       return res.status(400).json({ error: 'Service price must be greater than zero' });
     }
 
+    // Check for existing pending order for same student, service, and currency
+    const existingPendingOrder = await PaymentRecord.findOne({
+      studentId: student._id,
+      serviceId: service._id,
+      companyId: companyId || null,
+      currency,
+      status: 'pending'
+    }).sort({ createdAt: -1 });
+
+    if (existingPendingOrder) {
+      // Verify the order still exists and is valid on Razorpay
+      try {
+        const razorpay = getRazorpayInstance();
+        const existingOrder = await razorpay.orders.fetch(existingPendingOrder.razorpayOrderId);
+
+        if (existingOrder.status === 'created') {
+          return res.status(200).json({
+            orderId: existingOrder.id,
+            amount: existingOrder.amount,
+            currency: existingOrder.currency,
+            key: keyId,
+            serviceName: service.name,
+            reused: true
+          });
+        }
+
+        // Order is no longer valid (paid/expired), mark as failed and create new one
+        existingPendingOrder.status = 'failed';
+        existingPendingOrder.gatewayResponse = {
+          ...existingPendingOrder.gatewayResponse,
+          invalidatedAt: new Date().toISOString(),
+          razorpayStatus: existingOrder.status
+        };
+        await existingPendingOrder.save();
+      } catch (fetchError) {
+        // Order fetch failed, mark as failed and create new one
+        existingPendingOrder.status = 'failed';
+        existingPendingOrder.gatewayResponse = {
+          ...existingPendingOrder.gatewayResponse,
+          invalidatedAt: new Date().toISOString(),
+          fetchError: fetchError.message
+        };
+        await existingPendingOrder.save();
+      }
+    }
+
     const razorpay = getRazorpayInstance();
-    const orderPayload = {
+    const order = await razorpay.orders.create({
       amount: payableAmount,
       currency,
       receipt: buildReceipt(service._id),
@@ -353,23 +380,6 @@ exports.createOrder = async (req, res) => {
         studentId: String(student._id),
         companyId: companyId ? String(companyId) : ''
       }
-    };
-
-    logRazorpayDebug('Creating service order', {
-      keyIdPresent: Boolean(keyId),
-      keySecretPresent: Boolean(keySecret),
-      keySecretLength: keySecret.length,
-      keyMode: getRazorpayKeyMode(keyId),
-      payload: orderPayload
-    });
-
-    const order = await razorpay.orders.create(orderPayload);
-
-    logRazorpayDebug('Service order created', {
-      orderId: order.id,
-      status: order.status,
-      amount: order.amount,
-      currency: order.currency
     });
 
     await PaymentRecord.create({
@@ -383,7 +393,8 @@ exports.createOrder = async (req, res) => {
       status: 'pending',
       razorpayOrderId: order.id,
       transactionId: order.id,
-      paymentMethod: 'razorpay',
+      paymentGateway: 'razorpay',
+      paymentMethod: null, // Will be set after payment (upi, card, netbanking, etc.)
       gatewayResponse: {
         orderCreatedAt: new Date().toISOString(),
         razorpayOrderStatus: order.status,
@@ -400,16 +411,7 @@ exports.createOrder = async (req, res) => {
       serviceName: service.name
     });
   } catch (error) {
-    const diagnostics = getRazorpayCredentialDiagnostics();
-
-    console.error('Razorpay create order error:', {
-      message: error.message,
-      code: error.code,
-      statusCode: error.statusCode,
-      error: error.error,
-      description: error.description,
-      ...diagnostics
-    });
+    console.error('Razorpay create order error:', error.message);
 
     if (isRazorpayConfigurationError(error)) {
       return res.status(500).json({ error: error.message });
@@ -427,15 +429,16 @@ exports.createOrder = async (req, res) => {
 
 exports.verifyPayment = async (req, res) => {
   try {
-    const {
-      razorpay_order_id: razorpayOrderId,
-      razorpay_payment_id: razorpayPaymentId,
-      razorpay_signature: razorpaySignature
-    } = req.body || {};
+    const body = req.body || {};
+
+    // Accept both Razorpay's format (razorpay_order_id) and camelCase (orderId)
+    const razorpayOrderId = body.razorpay_order_id || body.orderId;
+    const razorpayPaymentId = body.razorpay_payment_id || body.paymentId;
+    const razorpaySignature = body.razorpay_signature || body.signature;
 
     if (!razorpayOrderId || !razorpayPaymentId || !razorpaySignature) {
       return res.status(400).json({
-        error: 'razorpay_order_id, razorpay_payment_id, and razorpay_signature are required'
+        error: 'orderId, paymentId, and signature are required'
       });
     }
 
@@ -459,14 +462,46 @@ exports.verifyPayment = async (req, res) => {
 
       if (paymentRecord) {
         paymentRecord.razorpayPaymentId = razorpayPaymentId;
-        paymentRecord.gatewayResponse = mergeGatewayResponse(paymentRecord.gatewayResponse, {
+
+        let paymentMethod = null;
+        let paymentDetails = {
           signatureVerifiedAt: new Date().toISOString(),
           verificationSource: 'checkout'
-        });
+        };
+
+        // Fetch payment details from Razorpay to get actual payment method
+        try {
+          const razorpay = getRazorpayInstance();
+          const razorpayPayment = await razorpay.payments.fetch(razorpayPaymentId);
+          paymentMethod = razorpayPayment.method || null;
+
+          paymentDetails = {
+            ...paymentDetails,
+            method: razorpayPayment.method,
+            bank: razorpayPayment.bank || null,
+            wallet: razorpayPayment.wallet || null,
+            vpa: razorpayPayment.vpa || null,
+            card: razorpayPayment.card ? {
+              last4: razorpayPayment.card.last4,
+              network: razorpayPayment.card.network,
+              type: razorpayPayment.card.type,
+              issuer: razorpayPayment.card.issuer
+            } : null,
+            email: razorpayPayment.email || null,
+            contact: razorpayPayment.contact || null,
+            fee: razorpayPayment.fee || null,
+            tax: razorpayPayment.tax || null,
+            international: razorpayPayment.international || false
+          };
+        } catch (fetchError) {
+          console.error('Failed to fetch payment details:', fetchError.message);
+        }
 
         await activateSubscriptionForPaymentRecord({
           paymentRecord,
           razorpayPaymentId,
+          paymentMethod,
+          paymentDetails,
           source: 'checkout',
           eventName: 'payment.verified'
         });
@@ -526,6 +561,7 @@ exports.handleWebhook = async (req, res) => {
     const paymentEntity = event.payload?.payment?.entity || {};
     const razorpayOrderId = paymentEntity.order_id;
     const razorpayPaymentId = paymentEntity.id;
+    const paymentMethod = paymentEntity.method; // upi, card, netbanking, wallet, etc.
 
     if (!razorpayOrderId) {
       console.error('Webhook payload is missing order_id');
@@ -539,9 +575,31 @@ exports.handleWebhook = async (req, res) => {
       return res.status(200).json({ received: true });
     }
 
+    // Extract payment details from webhook payload
+    const paymentDetails = {
+      method: paymentMethod,
+      bank: paymentEntity.bank || null,
+      wallet: paymentEntity.wallet || null,
+      vpa: paymentEntity.vpa || null,
+      card: paymentEntity.card ? {
+        last4: paymentEntity.card.last4,
+        network: paymentEntity.card.network,
+        type: paymentEntity.card.type,
+        issuer: paymentEntity.card.issuer
+      } : null,
+      email: paymentEntity.email || null,
+      contact: paymentEntity.contact || null,
+      fee: paymentEntity.fee || null,
+      tax: paymentEntity.tax || null,
+      captured: paymentEntity.captured || false,
+      international: paymentEntity.international || false
+    };
+
     await activateSubscriptionForPaymentRecord({
       paymentRecord,
       razorpayPaymentId,
+      paymentMethod,
+      paymentDetails,
       source: 'razorpay_webhook',
       eventName: event.event
     });

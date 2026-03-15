@@ -7,7 +7,7 @@ const ActiveSubscription = require('../models/ActiveSubscription');
 const Company = require('../models/Company');
 const PaymentRecord = require('../models/PaymentRecord');
 const { checkSubscriptionStatus, getApplicationLimit } = require('../services/subscriptionService');
-const { getActiveApplicationCount } = require('../services/applicationService');
+const { getSubscriptionUsage } = require('../services/applicationService');
 
 const generateTransactionId = () => `txn_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 const DEFAULT_PRO_PLAN_NAME = process.env.PRO_PLAN_NAME?.trim() || 'Pro Plan';
@@ -72,11 +72,9 @@ exports.getCurrentSubscription = async (req, res) => {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    // Get application limit and usage
+    // Get application limit and usage from subscription counter
     const applicationLimit = await getApplicationLimit(student._id);
-
-    // Count active applications (excluding withdrawn/rejected) - lifetime count for free tier
-    const applicationsUsed = await getActiveApplicationCount(student._id);
+    const { applicationsUsed } = await getSubscriptionUsage(student._id);
 
     const subscriptionState = await checkSubscriptionStatus(student._id);
 
@@ -118,29 +116,9 @@ exports.getCurrentSubscription = async (req, res) => {
   }
 };
 
-const calculateEndDate = (billingCycle, startDate = new Date()) => {
-  const end = new Date(startDate);
-
-  switch (billingCycle) {
-    case 'one-time':
-      return new Date('2099-12-31'); // Never expires
-    case 'yearly':
-      end.setFullYear(end.getFullYear() + 1);
-      return end;
-    case 'quarterly':
-      end.setMonth(end.getMonth() + 3);
-      return end;
-    case 'monthly':
-    default:
-      end.setMonth(end.getMonth() + 1);
-      return end;
-  }
-};
-
 const createOrUpgradeSubscriptionForStudent = async ({
   student,
   service,
-  autoRenew = false,
   paymentMethod = 'manual',
   currency = 'USD',
   gatewayResponse = null,
@@ -167,9 +145,8 @@ const createOrUpgradeSubscriptionForStudent = async ({
   }
 
   const now = new Date();
-  const endDate = calculateEndDate(service.billingCycle, now);
-  const shouldAutoRenew = service.billingCycle === 'one-time' ? false : Boolean(autoRenew);
 
+  // Mark previous subscription as exhausted if exists
   if (student.currentSubscriptionId) {
     const currentSub = await ActiveSubscription.findById(student.currentSubscriptionId)
       .populate('serviceId', 'tier');
@@ -177,19 +154,21 @@ const createOrUpgradeSubscriptionForStudent = async ({
     if (currentSub && currentSub.serviceId?.tier !== 'free') {
       await ActiveSubscription.updateOne(
         { _id: student.currentSubscriptionId, studentId: student._id, status: { $in: ['active', 'pending'] } },
-        { $set: { status: 'cancelled', autoRenew: false } }
+        { $set: { status: 'exhausted', autoRenew: false } }
       );
     }
   }
 
+  // Create new subscription with fresh application quota (applicationsUsed = 0)
   const subscription = await ActiveSubscription.create({
     studentId: student._id,
     serviceId: service._id,
     companyId,
     startDate: now,
-    endDate,
+    endDate: null, // Quota-based, not time-based
     status: 'active',
-    autoRenew: shouldAutoRenew
+    autoRenew: false,
+    applicationsUsed: 0
   });
 
   let paymentRecord = null;

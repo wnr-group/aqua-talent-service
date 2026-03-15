@@ -83,15 +83,11 @@ const AvailableServiceSchema = new mongoose.Schema({
     default: 'USD',
     enum: ['USD', 'EUR', 'GBP', 'INR', 'AUD', 'CAD']
   },
+  // All plans are now quota-based (one-time purchase for X applications)
   billingCycle: {
     type: String,
-    default: 'monthly',
-    enum: ['monthly', 'quarterly', 'yearly', 'one-time']
-  },
-  trialDays: {
-    type: Number,
-    default: 0,
-    min: 0
+    default: 'one-time',
+    enum: ['one-time']
   },
   discount: {
     type: Number,
@@ -113,12 +109,12 @@ const AvailableServiceSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
-  // Feature limits
-  resumeDownloadsPerMonth: {
+  // Feature limits (per plan purchase, not per month)
+  resumeDownloads: {
     type: Number,
     default: null // null means unlimited
   },
-  videoViewsPerMonth: {
+  videoViews: {
     type: Number,
     default: null // null means unlimited
   },
@@ -174,8 +170,8 @@ AvailableServiceSchema.statics.getFreePlan = async function() {
       maxApplications: null, // Will use SystemConfig value
       price: 0,
       currency: 'USD',
-      billingCycle: 'monthly',
-      features: ['Basic job search', 'Limited applications per month', 'Profile creation'],
+      billingCycle: 'one-time',
+      features: ['Basic job search', 'Limited applications', 'Profile creation'],
       isActive: true,
       displayOrder: 0
     });

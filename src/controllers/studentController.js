@@ -6,6 +6,7 @@ const JobPosting = require('../models/JobPosting');
 const Application = require('../models/Application');
 const { STUDENT_APPLICATION_STATUS_MAP } = require('../constants');
 const { getApplicationLimit } = require('../services/subscriptionService');
+const { getSubscriptionUsage, incrementApplicationCount, decrementApplicationCount } = require('../services/applicationService');
 const { uploadStudentResume } = require('../services/mediaService');
 const emailService = require('../services/emailService');
 const notificationService = require('../services/notificationService');
@@ -220,30 +221,24 @@ exports.getDashboard = async (req, res) => {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    const stats = await Application.aggregate([
-      { $match: { studentId: student._id } },
-      {
-        $group: {
-          _id: null,
-          applicationsUsed: {
-            $sum: { $cond: [{ $not: [{ $in: ['$status', ['withdrawn', 'rejected']] }] }, 1, 0] }
-          },
-          pendingApplications: {
-            $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] }
-          }
-        }
-      }
-    ]);
+    // Get application usage from subscription counter
+    const { applicationsUsed } = await getSubscriptionUsage(student._id);
+
+    // Get pending applications count
+    const pendingApplications = await Application.countDocuments({
+      studentId: student._id,
+      status: 'pending'
+    });
 
     const applicationLimit = await getApplicationLimit(student._id);
     const hasUnlimitedApplications = applicationLimit === Infinity;
 
     res.json({
-      applicationsUsed: stats[0]?.applicationsUsed || 0,
+      applicationsUsed,
       applicationLimit: hasUnlimitedApplications ? null : applicationLimit,
       hasUnlimitedApplications,
       subscriptionTier: student.subscriptionTier,
-      pendingApplications: stats[0]?.pendingApplications || 0,
+      pendingApplications,
       isHired: student.isHired
     });
   } catch (error) {
@@ -425,14 +420,16 @@ exports.applyToJob = async (req, res) => {
       });
     }
 
-    const activeApplications = await Application.countDocuments({
-      studentId: student._id,
-      status: { $nin: ['withdrawn', 'rejected'] }
-    });
-
+    // Check application quota from subscription
     const applicationLimit = await getApplicationLimit(student._id);
-    if (applicationLimit !== Infinity && activeApplications >= applicationLimit) {
-      return res.status(403).json({ error: 'Application limit reached' });
+    const { applicationsUsed } = await getSubscriptionUsage(student._id);
+
+    if (applicationLimit !== Infinity && applicationsUsed >= applicationLimit) {
+      return res.status(403).json({
+        error: 'Application limit reached. Please upgrade your plan to apply to more jobs.',
+        applicationsUsed,
+        applicationLimit
+      });
     }
 
     const existingApp = await Application.findOne({
@@ -473,6 +470,9 @@ exports.applyToJob = async (req, res) => {
         status: 'pending'
       });
     }
+
+    // Increment application count on subscription
+    await incrementApplicationCount(student._id);
 
     const populatedApp = await Application.findById(application._id)
       .populate({
@@ -603,6 +603,9 @@ exports.withdrawApplication = async (req, res) => {
 
     application.status = 'withdrawn';
     await application.save();
+
+    // Give back the application quota on withdrawal
+    await decrementApplicationCount(student._id);
 
     res.json(application);
 
