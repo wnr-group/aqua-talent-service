@@ -366,7 +366,8 @@ exports.registerStudent = async (req, res) => {
       startDate: new Date(),
       endDate: new Date('2099-12-31'),
       status: 'active',
-      autoRenew: false
+      autoRenew: false,
+      applicationsUsed: 0
     });
 
     // Update student with subscription ID

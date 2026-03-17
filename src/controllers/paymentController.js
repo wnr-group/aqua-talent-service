@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const geoip = require('geoip-lite');
 
 const Student = require('../models/Student');
-const Company = require('../models/Company');
+const ActiveSubscription = require('../models/ActiveSubscription');
 const AvailableService = require('../models/AvailableService');
 const PaymentRecord = require('../models/PaymentRecord');
 const {
@@ -156,7 +156,7 @@ const activateSubscriptionForPaymentRecord = async ({
 
     await paymentRecord.save();
 
-    console.log('Subscription already exists:', String(paymentRecord.subscriptionId));
+    console.log('Subscription already activated (idempotent skip):', String(paymentRecord.subscriptionId));
 
     return {
       alreadyProcessed: true,
@@ -183,14 +183,6 @@ const activateSubscriptionForPaymentRecord = async ({
     throw new Error('Subscription service not found for payment record');
   }
 
-  if (paymentRecord.companyId) {
-    const companyExists = await Company.exists({ _id: paymentRecord.companyId });
-
-    if (!companyExists) {
-      throw new Error('Company not found for payment record');
-    }
-  }
-
   // Create quota-based subscription
   const result = await createOrUpgradeSubscriptionForStudent({
     student,
@@ -205,7 +197,6 @@ const activateSubscriptionForPaymentRecord = async ({
       method: paymentMethod,
       ...paymentDetails
     },
-    companyId: paymentRecord.companyId,
     createPaymentRecord: false,
     paymentAmount: paymentRecord.amount
   });
@@ -273,7 +264,7 @@ exports.createOrder = async (req, res) => {
       });
     }
 
-    const { serviceId, companyId = null } = req.body || {};
+    const { serviceId } = req.body || {};
     const currency = normalizeCurrency(req.body?.currency, 'INR');
 
     if (!serviceId || !mongoose.Types.ObjectId.isValid(serviceId)) {
@@ -282,10 +273,6 @@ exports.createOrder = async (req, res) => {
 
     if (!currency) {
       return res.status(400).json({ error: 'currency must be INR or USD' });
-    }
-
-    if (companyId && !mongoose.Types.ObjectId.isValid(companyId)) {
-      return res.status(400).json({ error: 'Invalid company ID format' });
     }
 
     const student = await Student.findOne({ userId: req.user.userId });
@@ -298,18 +285,6 @@ exports.createOrder = async (req, res) => {
 
     if (!service) {
       return res.status(404).json({ error: 'Subscription service not found' });
-    }
-
-    if (service.isCompanySpotlight && !companyId) {
-      return res.status(400).json({ error: 'companyId is required for spotlight subscriptions' });
-    }
-
-    if (companyId) {
-      const companyExists = await Company.exists({ _id: companyId });
-
-      if (!companyExists) {
-        return res.status(404).json({ error: 'Company not found' });
-      }
     }
 
     const selectedPrice = getServicePrice(service, currency);
@@ -328,7 +303,6 @@ exports.createOrder = async (req, res) => {
     const existingPendingOrder = await PaymentRecord.findOne({
       studentId: student._id,
       serviceId: service._id,
-      companyId: companyId || null,
       currency,
       status: 'pending'
     }).sort({ createdAt: -1 });
@@ -377,8 +351,7 @@ exports.createOrder = async (req, res) => {
       receipt: buildReceipt(service._id),
       notes: {
         serviceId: String(service._id),
-        studentId: String(student._id),
-        companyId: companyId ? String(companyId) : ''
+        studentId: String(student._id)
       }
     });
 
@@ -386,7 +359,6 @@ exports.createOrder = async (req, res) => {
       studentId: student._id,
       serviceId: service._id,
       subscriptionId: null,
-      companyId,
       amount: selectedPrice,
       currency,
       paymentDate: new Date(),
@@ -497,7 +469,7 @@ exports.verifyPayment = async (req, res) => {
           console.error('Failed to fetch payment details:', fetchError.message);
         }
 
-        await activateSubscriptionForPaymentRecord({
+        const activationResult = await activateSubscriptionForPaymentRecord({
           paymentRecord,
           razorpayPaymentId,
           paymentMethod,
@@ -505,6 +477,30 @@ exports.verifyPayment = async (req, res) => {
           source: 'checkout',
           eventName: 'payment.verified'
         });
+
+        if (activationResult.subscriptionId) {
+          const activatedSubscription = await ActiveSubscription.findById(activationResult.subscriptionId)
+            .populate('serviceId', 'name tier maxApplications');
+
+          if (activatedSubscription) {
+            return res.json({
+              success: true,
+              message: 'Payment verified and subscription activated',
+              payment: {
+                razorpay_order_id: razorpayOrderId,
+                razorpay_payment_id: razorpayPaymentId
+              },
+              subscription: {
+                id: activatedSubscription._id,
+                plan: activatedSubscription.serviceId?.name || null,
+                tier: activatedSubscription.serviceId?.tier || null,
+                maxApplications: activatedSubscription.serviceId?.maxApplications || null,
+                status: activatedSubscription.status,
+                startDate: activatedSubscription.startDate
+              }
+            });
+          }
+        }
       }
     }
 

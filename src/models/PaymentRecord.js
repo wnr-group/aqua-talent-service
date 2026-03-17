@@ -18,11 +18,6 @@ const PaymentRecordSchema = new mongoose.Schema({
     ref: 'ActiveSubscription',
     default: null
   },
-  companyId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Company',
-    default: null
-  },
   amount: {
     type: Number,
     required: true,

@@ -4,6 +4,8 @@ const Student = require('../models/Student');
 const Company = require('../models/Company');
 const JobPosting = require('../models/JobPosting');
 const Application = require('../models/Application');
+const ActiveSubscription = require('../models/ActiveSubscription');
+const AvailableService = require('../models/AvailableService');
 const { STUDENT_APPLICATION_STATUS_MAP } = require('../constants');
 const { getApplicationLimit } = require('../services/subscriptionService');
 const { getSubscriptionUsage, incrementApplicationCount, decrementApplicationCount } = require('../services/applicationService');
@@ -247,6 +249,68 @@ exports.getDashboard = async (req, res) => {
   }
 };
 
+const getCurrentPlanDetails = async (student) => {
+  if (!student) {
+    return {
+      currentPlan: null,
+      currentPlanLimit: null,
+      currentPlanStartDate: null
+    };
+  }
+
+  let subscription = null;
+
+  if (student.currentSubscriptionId) {
+    subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
+      .populate('serviceId', 'name tier maxApplications')
+      .lean();
+  }
+
+  if (!subscription || subscription.status !== 'active') {
+    subscription = await ActiveSubscription.findOne({
+      studentId: student._id,
+      status: 'active'
+    })
+      .sort({ createdAt: -1 })
+      .populate('serviceId', 'name tier maxApplications')
+      .lean();
+  }
+
+  const planLimit = subscription?.serviceId?.maxApplications;
+  const currentPlan = subscription?.serviceId?.name || (student.subscriptionTier === 'free' ? 'Free Tier' : null);
+
+  if (typeof planLimit === 'number') {
+    return {
+      currentPlan,
+      currentPlanLimit: planLimit,
+      currentPlanStartDate: subscription?.startDate || null
+    };
+  }
+
+  if (subscription?.serviceId?.tier === 'free' || student.subscriptionTier === 'free') {
+    const freePlan = await AvailableService.findOne({ tier: 'free', isActive: true })
+      .sort({ createdAt: 1 })
+      .select('name maxApplications')
+      .lean();
+
+    return {
+      currentPlan: freePlan?.name || currentPlan,
+      currentPlanLimit: typeof freePlan?.maxApplications === 'number' ? freePlan.maxApplications : null,
+      currentPlanStartDate: subscription?.startDate || null
+    };
+  }
+
+  return {
+    currentPlan,
+    currentPlanLimit: null,
+    currentPlanStartDate: subscription?.startDate || null
+  };
+};
+
+const getCurrentPlanApplicationCount = async (studentId) => {
+  return Application.countDocuments({ studentId, status: { $ne: 'withdrawn' } });
+};
+
 exports.getJobs = async (req, res) => {
   try {
     const { search, location, jobType, page = 1, limit = 10 } = req.query;
@@ -333,15 +397,32 @@ exports.getJob = async (req, res) => {
     let hasApplied = false;
     let applicationStatus = null;
     let student = null;
-
+    let isDescriptionLocked = false;
     // Check if student has applied to this job
     if (req.user && req.user.userType === 'student') {
       student = await Student.findOne({ userId: req.user.userId });
       if (student) {
-        const application = await Application.findOne({
-          studentId: student._id,
-          jobPostingId: jobId
+        const [application, planDetails] = await Promise.all([
+          Application.findOne({
+            studentId: student._id,
+            jobPostingId: jobId
+          }),
+          getCurrentPlanDetails(student)
+        ]);
+
+        const totalApplications = await getCurrentPlanApplicationCount(student._id);
+        const isLimitReached = typeof planDetails.currentPlanLimit === 'number' && totalApplications >= planDetails.currentPlanLimit;
+
+        console.log({
+          plan: planDetails.currentPlan,
+          planLimit: planDetails.currentPlanLimit,
+          totalApplications,
+          isLimitReached
         });
+
+        if (isLimitReached) {
+          isDescriptionLocked = true;
+        }
 
         if (application) {
           hasApplied = true;
@@ -369,7 +450,7 @@ exports.getJob = async (req, res) => {
     res.json({
       id: jobObj._id,
       title: jobObj.title,
-      description: jobObj.description,
+      description: isDescriptionLocked ? null : jobObj.description,
       requirements: jobObj.requirements,
       location: jobObj.location,
       jobType: jobObj.jobType,
@@ -391,6 +472,7 @@ exports.getJob = async (req, res) => {
         },
         foundedYear: jobObj.companyId.foundedYear
       } : null,
+      isDescriptionLocked,
       hasApplied,
       applicationStatus
     });
@@ -420,15 +502,22 @@ exports.applyToJob = async (req, res) => {
       });
     }
 
-    // Check application quota from subscription
-    const applicationLimit = await getApplicationLimit(student._id);
-    const { applicationsUsed } = await getSubscriptionUsage(student._id);
+    const planDetails = await getCurrentPlanDetails(student);
+    const totalApplications = await getCurrentPlanApplicationCount(student._id);
+    const isLimitReached = typeof planDetails.currentPlanLimit === 'number' && totalApplications >= planDetails.currentPlanLimit;
 
-    if (applicationLimit !== Infinity && applicationsUsed >= applicationLimit) {
+    console.log({
+      plan: planDetails.currentPlan,
+      planLimit: planDetails.currentPlanLimit,
+      totalApplications,
+      isLimitReached
+    });
+
+    if (isLimitReached) {
       return res.status(403).json({
         error: 'Application limit reached. Please upgrade your plan to apply to more jobs.',
-        applicationsUsed,
-        applicationLimit
+        applicationsUsed: totalApplications,
+        applicationLimit: planDetails.currentPlanLimit
       });
     }
 
@@ -519,6 +608,8 @@ exports.applyToJob = async (req, res) => {
       .catch((error) => {
         console.error('Failed to send application submission email', error);
       });
+
+    return;
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });

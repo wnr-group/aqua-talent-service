@@ -1526,15 +1526,14 @@ exports.deleteSubscriptionPlan = async (req, res) => {
 
 exports.getFreeTierConfig = async (req, res) => {
   try {
-    const [maxApplications, features, resumeDownloads, videoViews] = await Promise.all([
-      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_MAX_APPLICATIONS, 2),
+    const [features, resumeDownloads, videoViews] = await Promise.all([
       SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_FEATURES, []),
       SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_RESUME_DOWNLOADS, null),
       SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_VIDEO_VIEWS, null)
     ]);
 
     res.json({
-      maxApplications,
+      maxApplications: 2,
       features,
       resumeDownloadsPerMonth: resumeDownloads,
       videoViewsPerMonth: videoViews
@@ -1552,13 +1551,13 @@ exports.updateFreeTierConfig = async (req, res) => {
     const updates = [];
 
     if (maxApplications !== undefined) {
-      if (maxApplications !== null && (maxApplications < 0 || !Number.isInteger(maxApplications))) {
-        return res.status(400).json({ error: 'Max applications must be a non-negative integer or null for unlimited' });
+      if (maxApplications !== 2) {
+        return res.status(400).json({ error: 'Free tier max applications is fixed at 2' });
       }
       updates.push(
         SystemConfig.setValue(
           CONFIG_KEYS.FREE_TIER_MAX_APPLICATIONS,
-          maxApplications,
+          2,
           'Maximum applications allowed for free tier',
           req.user.userId
         )
@@ -1608,15 +1607,14 @@ exports.updateFreeTierConfig = async (req, res) => {
     await Promise.all(updates);
 
     // Return updated config
-    const [updatedMaxApps, updatedFeatures, updatedResumeDownloads, updatedVideoViews] = await Promise.all([
-      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_MAX_APPLICATIONS, 2),
+    const [updatedFeatures, updatedResumeDownloads, updatedVideoViews] = await Promise.all([
       SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_FEATURES, []),
       SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_RESUME_DOWNLOADS, null),
       SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_VIDEO_VIEWS, null)
     ]);
 
     res.json({
-      maxApplications: updatedMaxApps,
+      maxApplications: 2,
       features: updatedFeatures,
       resumeDownloadsPerMonth: updatedResumeDownloads,
       videoViewsPerMonth: updatedVideoViews

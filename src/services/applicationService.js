@@ -1,5 +1,6 @@
 const Student = require('../models/Student');
 const ActiveSubscription = require('../models/ActiveSubscription');
+const Application = require('../models/Application');
 const { getApplicationLimit } = require('./subscriptionService');
 
 const getSubscriptionUsage = async (studentId) => {
@@ -32,7 +33,7 @@ const incrementApplicationCount = async (studentId) => {
   const subscription = await ActiveSubscription.findByIdAndUpdate(
     student.currentSubscriptionId,
     { $inc: { applicationsUsed: 1 } },
-    { new: true }
+    { returnDocument: 'after' }
   );
 
   return subscription;
@@ -49,7 +50,7 @@ const decrementApplicationCount = async (studentId) => {
   const subscription = await ActiveSubscription.findOneAndUpdate(
     { _id: student.currentSubscriptionId, applicationsUsed: { $gt: 0 } },
     { $inc: { applicationsUsed: -1 } },
-    { new: true }
+    { returnDocument: 'after' }
   );
 
   return subscription;
@@ -74,6 +75,20 @@ const canApply = async (studentId) => {
 
   const applicationLimit = await getApplicationLimit(studentId);
   const { applicationsUsed } = await getSubscriptionUsage(studentId);
+
+  if (student.subscriptionTier === 'free') {
+    const submittedApplications = await Application.countDocuments({ studentId });
+
+    if (submittedApplications >= applicationLimit) {
+      return {
+        canApply: false,
+        reason: 'free_tier_limit',
+        applicationsUsed: submittedApplications,
+        applicationLimit,
+        message: 'Free tier allows only 2 job applications'
+      };
+    }
+  }
 
   if (applicationLimit === Infinity) {
     return {
