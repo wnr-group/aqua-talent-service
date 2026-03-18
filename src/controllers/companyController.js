@@ -10,6 +10,7 @@ const Company = require('../models/Company');
 const JobPosting = require('../models/JobPosting');
 const Application = require('../models/Application');
 const Student = require('../models/Student');
+const ZoneCountry = require('../models/ZoneCountry');
 const { createJobSchema, createDraftJobSchema, updateJobSchema, companyProfileSchema } = require('../utils/validation');
 const { JOB_STATUSES, JOB_TYPES, APPLICATION_STATUSES } = require('../constants');
 const { uploadCompanyLogo, getPresignedUrl } = require('../services/mediaService');
@@ -257,6 +258,18 @@ exports.createJob = async (req, res) => {
     const jobType = parsed.jobType || null;
     const salaryRange = parsed.salaryRange || null;
     const deadline = parsed.deadline ? new Date(parsed.deadline) : null;
+    const countryId = parsed.countryId || null;
+
+    // Validate countryId if provided
+    if (countryId) {
+      if (!mongoose.Types.ObjectId.isValid(countryId)) {
+        return res.status(400).json({ error: 'Invalid country ID format' });
+      }
+      const country = await ZoneCountry.findById(countryId);
+      if (!country) {
+        return res.status(400).json({ error: 'Country not found' });
+      }
+    }
 
     // Safe access for any uploaded files
     const file = req.files?.[0] || null;
@@ -270,6 +283,7 @@ exports.createJob = async (req, res) => {
       jobType,
       salaryRange,
       deadline,
+      countryId: countryId || null,
       status: requestedStatus
     });
 
@@ -431,6 +445,22 @@ exports.updateJob = async (req, res) => {
     if (parsed.jobType !== undefined) updateFields.jobType = parsed.jobType;
     if (parsed.salaryRange !== undefined) updateFields.salaryRange = parsed.salaryRange;
     if (parsed.deadline !== undefined) updateFields.deadline = parsed.deadline ? new Date(parsed.deadline) : null;
+
+    // Handle countryId update
+    if (parsed.countryId !== undefined) {
+      if (parsed.countryId === null) {
+        updateFields.countryId = null;
+      } else {
+        if (!mongoose.Types.ObjectId.isValid(parsed.countryId)) {
+          return res.status(400).json({ error: 'Invalid country ID format' });
+        }
+        const country = await ZoneCountry.findById(parsed.countryId);
+        if (!country) {
+          return res.status(400).json({ error: 'Country not found' });
+        }
+        updateFields.countryId = parsed.countryId;
+      }
+    }
 
     // If submitting a draft, validate that required fields are present (either in update or existing doc)
     if (wantsToSubmit) {
