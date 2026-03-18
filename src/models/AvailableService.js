@@ -138,6 +138,10 @@ const AvailableServiceSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  allZonesIncluded: {
+    type: Boolean,
+    default: false
+  },
   createdAt: {
     type: Date,
     default: Date.now
@@ -171,6 +175,7 @@ AvailableServiceSchema.statics.getFreePlan = async function() {
     billingCycle: 'one-time',
     features: ['Basic job search', 'Limited applications', 'Profile creation'],
     isActive: true,
+    allZonesIncluded: true,
     displayOrder: 0
   };
 
@@ -211,6 +216,11 @@ AvailableServiceSchema.statics.getFreePlan = async function() {
 
     if (!freePlan.isActive) {
       freePlan.isActive = true;
+      hasUpdates = true;
+    }
+
+    if (!freePlan.allZonesIncluded) {
+      freePlan.allZonesIncluded = true;
       hasUpdates = true;
     }
 
