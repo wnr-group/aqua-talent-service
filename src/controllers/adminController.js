@@ -1373,14 +1373,17 @@ exports.createSubscriptionPlan = async (req, res) => {
       return res.status(400).json({ error: `Currency must be one of: ${CURRENCIES.join(', ')}` });
     }
 
-    if (!maxApplications || maxApplications < 1) {
-      return res.status(400).json({ error: 'maxApplications is required and must be at least 1' });
+    // Normalize empty string / undefined to null (null = unlimited)
+    const normalizedMaxApplications = (maxApplications === '' || maxApplications === undefined) ? null : maxApplications;
+
+    if (normalizedMaxApplications !== null && normalizedMaxApplications < 1) {
+      return res.status(400).json({ error: 'maxApplications must be at least 1, or omit it for unlimited' });
     }
 
     const plan = await AvailableService.create({
       name: name.trim(),
       description: description.trim(),
-      maxApplications,
+      maxApplications: normalizedMaxApplications,
       price,
       nonIndianPrice: nonIndianPrice ?? null,
       internationalPrice: nonIndianPrice ?? null,
@@ -1476,10 +1479,17 @@ exports.updateSubscriptionPlan = async (req, res) => {
     }
 
     if (maxApplications !== undefined) {
-      if (maxApplications !== null && maxApplications < 1) {
-        return res.status(400).json({ error: 'maxApplications must be at least 1' });
+      if (plan.tier === 'free') {
+        // Free plan limit is permanently fixed at 2
+        plan.maxApplications = 2;
+      } else {
+        // Normalize empty string to null (unlimited)
+        const normalizedMax = maxApplications === '' ? null : maxApplications;
+        if (normalizedMax !== null && normalizedMax < 1) {
+          return res.status(400).json({ error: 'maxApplications must be at least 1, or null for unlimited' });
+        }
+        plan.maxApplications = normalizedMax;
       }
-      plan.maxApplications = maxApplications;
     }
     if (discount !== undefined) plan.discount = discount;
     if (features !== undefined) plan.features = features;
