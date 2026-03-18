@@ -22,6 +22,7 @@ router.get('/profile', companyController.getProfile);
 router.patch('/profile', companyController.updateProfile);
 router.post('/profile/logo', logoUploadMiddleware, companyController.uploadLogo);
 
+router.get('/countries', companyController.getCountries);
 router.get('/dashboard', companyController.getDashboard);
 router.get('/jobs', companyController.getJobs);
 router.post('/jobs', companyController.createJob);

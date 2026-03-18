@@ -1261,3 +1261,28 @@ exports.getStudentProfile = async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 };
+
+exports.getCountries = async (req, res) => {
+  try {
+    const Zone = require('../models/Zone');
+
+    const countries = await ZoneCountry.find()
+      .populate('zoneId', 'name')
+      .sort({ countryName: 1 })
+      .lean();
+
+    const formattedCountries = countries.map(c => ({
+      id: c._id,
+      name: c.countryName,
+      zone: c.zoneId ? {
+        id: c.zoneId._id,
+        name: c.zoneId.name
+      } : null
+    }));
+
+    res.json({ countries: formattedCountries });
+  } catch (error) {
+    console.error('Get countries error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
