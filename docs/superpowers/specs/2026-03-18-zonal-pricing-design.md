@@ -69,7 +69,7 @@ countryId: {
 // Keep existing `location` field for free-text display
 ```
 
-### 2. Addon — Add unlockAllZones flag
+### 2. Addon — Add unlockAllZones flag and update validation
 
 ```javascript
 // Add to existing Addon schema
@@ -77,6 +77,28 @@ unlockAllZones: {
   type: Boolean,
   default: false  // When true, grants access to all zones
 }
+
+// UPDATE existing pre-validate hook to allow unlockAllZones addons:
+// - When type === 'zone' AND unlockAllZones === true, zoneCount is NOT required
+// - When type === 'zone' AND unlockAllZones === false, zoneCount IS required
+```
+
+**Validation Logic Update:**
+```javascript
+AddonSchema.pre('validate', function() {
+  if (this.type === 'zone') {
+    // unlockAllZones addons don't need zoneCount
+    if (!this.unlockAllZones) {
+      if (!isPresent(this.zoneCount) || this.zoneCount <= 0) {
+        this.invalidate('zoneCount', 'Zone addon must define zoneCount (unless unlockAllZones)');
+      }
+    }
+    if (isPresent(this.jobCreditCount)) {
+      this.invalidate('jobCreditCount', 'Zone addon cannot define jobCreditCount');
+    }
+  }
+  // ... rest of validation unchanged
+});
 ```
 
 ### 3. New Model: PayPerJobPurchase
@@ -115,25 +137,40 @@ const PayPerJobPurchaseSchema = new mongoose.Schema({
   createdAt: {
     type: Date,
     default: Date.now
+  },
+  completedAt: {
+    type: Date,
+    default: null  // Set when status changes to 'completed'
   }
 }, {
   collection: 'pay_per_job_purchases'
 });
 
-PayPerJobPurchaseSchema.index({ studentId: 1, jobPostingId: 1 }, { unique: true });
+// Unique constraint only on completed purchases - allows retrying failed purchases
+PayPerJobPurchaseSchema.index(
+  { studentId: 1, jobPostingId: 1 },
+  { unique: true, partialFilterExpression: { status: 'completed' } }
+);
 PayPerJobPurchaseSchema.index({ studentId: 1 });
 PayPerJobPurchaseSchema.index({ status: 1 });
 ```
 
-### 4. AvailableService — Add zone count hint
+**Retry Logic:** If a student has a `pending` or `failed` PayPerJobPurchase, a new purchase attempt should update the existing record rather than creating a new one. Only `completed` purchases enforce uniqueness.
+
+### 4. AvailableService — Add allZonesIncluded flag
 
 ```javascript
 // Add to existing AvailableService schema
-zonesIncludedCount: {
-  type: Number,
-  default: null  // null = all zones, number = display hint
+allZonesIncluded: {
+  type: Boolean,
+  default: false  // true for Free and Premium plans
 }
 ```
+
+**Note:** The number of zones included is computed dynamically from `PlanZone` count. The `allZonesIncluded` flag is used to:
+1. Grant all-zone access without checking PlanZone entries
+2. Display "All Zones" on pricing page instead of a count
+3. Handle Free tier and Premium plan zone access
 
 ### Existing Models (No Changes Needed)
 
@@ -153,15 +190,20 @@ zonesIncludedCount: {
 ```javascript
 async function getAccessibleZones(studentId) {
   const student = await Student.findById(studentId);
-
-  // Free tier gets all zones
-  if (student.subscriptionTier === 'free') {
-    return { allZones: true };
+  if (!student) {
+    return { allZones: false, zoneIds: [] };
   }
 
-  const subscription = await ActiveSubscription.findById(student.currentSubscriptionId);
+  const subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
+    .populate('serviceId', 'allZonesIncluded');
+
   if (!subscription) {
     return { allZones: false, zoneIds: [] };
+  }
+
+  // Check if plan grants all zones (Free tier, Premium, etc.)
+  if (subscription.serviceId?.allZonesIncluded) {
+    return { allZones: true };
   }
 
   // Check for "unlock all zones" addon
@@ -175,7 +217,7 @@ async function getAccessibleZones(studentId) {
     return { allZones: true };
   }
 
-  // Get zones from plan + individual addons
+  // Get zones from plan + individual addons via SubscriptionZone
   const zoneIds = await SubscriptionZone.find({
     subscriptionId: subscription._id
   }).distinct('zoneId');
@@ -183,6 +225,11 @@ async function getAccessibleZones(studentId) {
   return { allZones: false, zoneIds };
 }
 ```
+
+**Note:** Zone access is determined by:
+1. `AvailableService.allZonesIncluded` flag on the plan (for Free/Premium)
+2. "Unlock All Zones" addon purchase
+3. Specific zones in `SubscriptionZone` (from plan assignments + zone add-ons)
 
 ### Checking Job Access
 
@@ -314,6 +361,21 @@ When zone is locked:
    - Create SubscriptionZone entries (or mark unlockAllZones)
 5. Student can access new zone(s)
 
+**Request Schema:**
+```json
+{
+  "addonId": "ObjectId",
+  "zoneIds": ["ObjectId", "ObjectId"]  // Required for single/bundle zone addons
+                                        // Ignored for unlockAllZones addons
+}
+```
+
+**Validation:**
+- For single zone addon: `zoneIds.length === 1`
+- For 2-zone bundle: `zoneIds.length === 2`
+- For unlockAllZones addon: `zoneIds` is ignored
+- Cannot select zones already accessible to the student
+
 ### Pay Per Job Purchase
 
 1. Student clicks "Pay ₹2500" → `POST /student/pay-per-job/:jobId`
@@ -398,9 +460,15 @@ When zone is locked:
 ### Company Portal Changes
 
 **Job Posting Form:**
-- Add Country dropdown (required)
+- Add Country dropdown (required for new jobs when zone enforcement is enabled)
 - Fetch from `GET /company/countries`
-- Keep Location as free-text
+- Keep Location as free-text for specific address/office details
+- Show warning if country not selected: "Jobs without a country will be visible to all students"
+
+**Note on countryId requirement:**
+- When `ZONE_ENFORCEMENT_ENABLED=false`: `countryId` is optional
+- When `ZONE_ENFORCEMENT_ENABLED=true`: `countryId` is required for new jobs
+- Existing jobs without `countryId` remain accessible to all (backward compatible)
 
 ---
 
