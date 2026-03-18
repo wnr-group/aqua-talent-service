@@ -199,6 +199,13 @@ const createOrUpgradeSubscriptionForStudent = async ({
     }
   );
 
+  // Populate subscription zones from plan configuration
+  const { ensureSubscriptionZonesForPlan } = require('../services/zonePricingService');
+  await ensureSubscriptionZonesForPlan({
+    subscriptionId: subscription._id,
+    serviceId: service._id
+  });
+
   const populatedSubscription = await ActiveSubscription.findById(subscription._id)
     .populate('serviceId', 'name description maxApplications price features');
 
