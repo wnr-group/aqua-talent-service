@@ -29,4 +29,32 @@ router.post(
 router.post('/webhooks/razorpay', paymentController.handleWebhook);
 router.get('/geo-location', paymentController.getGeoLocation);
 
+router.post(
+  '/zone-addon/purchase',
+  requireAuth,
+  requireUserType('student'),
+  paymentController.purchaseZoneAddon
+);
+
+router.post(
+  '/zone-addon/verify',
+  requireAuth,
+  requireUserType('student'),
+  paymentController.verifyZoneAddonPayment
+);
+
+router.post(
+  '/pay-per-job/:jobId',
+  requireAuth,
+  requireUserType('student'),
+  paymentController.initiatePayPerJob
+);
+
+router.post(
+  '/pay-per-job/:jobId/verify',
+  requireAuth,
+  requireUserType('student'),
+  paymentController.verifyPayPerJob
+);
+
 module.exports = router;
