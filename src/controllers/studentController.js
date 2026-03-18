@@ -6,12 +6,14 @@ const JobPosting = require('../models/JobPosting');
 const Application = require('../models/Application');
 const ActiveSubscription = require('../models/ActiveSubscription');
 const AvailableService = require('../models/AvailableService');
+const Zone = require('../models/Zone');
 const { STUDENT_APPLICATION_STATUS_MAP } = require('../constants');
 const { getApplicationLimit } = require('../services/subscriptionService');
 const { getSubscriptionUsage, incrementApplicationCount, decrementApplicationCount } = require('../services/applicationService');
 const { uploadStudentResume } = require('../services/mediaService');
 const emailService = require('../services/emailService');
 const notificationService = require('../services/notificationService');
+const { canAccessJob, getUnlockOptions, isZoneEnforcementEnabled } = require('../services/zoneAccessService');
 
 // Check if email is taken by another user (excluding current student)
 const isEmailTakenByOther = async (email, currentStudentId) => {
@@ -260,23 +262,17 @@ const getCurrentPlanDetails = async (student) => {
 
   let subscription = null;
 
+  // For quota-based subscriptions, always use the student's current subscription
+  // The quota limit check (applicationsUsed vs maxApplications) determines access, not the status
   if (student.currentSubscriptionId) {
     subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
       .populate('serviceId', 'name tier maxApplications')
       .lean();
   }
 
-  if (!subscription || subscription.status !== 'active') {
-    subscription = await ActiveSubscription.findOne({
-      studentId: student._id,
-      status: 'active'
-    })
-      .sort({ createdAt: -1 })
-      .populate('serviceId', 'name tier maxApplications')
-      .lean();
-  }
-
-  const planLimit = subscription?.serviceId?.maxApplications;
+  // Use maxApplications from subscription (snapshot at purchase time) if available,
+  // otherwise fall back to the service's current maxApplications
+  const planLimit = subscription?.maxApplications ?? subscription?.serviceId?.maxApplications;
   const currentPlan = subscription?.serviceId?.name || (student.subscriptionTier === 'free' ? 'Free Tier' : null);
 
   if (typeof planLimit === 'number') {
@@ -307,9 +303,6 @@ const getCurrentPlanDetails = async (student) => {
   };
 };
 
-const getCurrentPlanApplicationCount = async (studentId) => {
-  return Application.countDocuments({ studentId, status: { $ne: 'withdrawn' } });
-};
 
 exports.getJobs = async (req, res) => {
   try {
@@ -398,25 +391,29 @@ exports.getJob = async (req, res) => {
     let applicationStatus = null;
     let student = null;
     let isDescriptionLocked = false;
+
+    console.log('[getJob] req.user:', req.user);
+
     // Check if student has applied to this job
     if (req.user && req.user.userType === 'student') {
       student = await Student.findOne({ userId: req.user.userId });
       if (student) {
-        const [application, planDetails] = await Promise.all([
+        const [application, planDetails, usage] = await Promise.all([
           Application.findOne({
             studentId: student._id,
             jobPostingId: jobId
           }),
-          getCurrentPlanDetails(student)
+          getCurrentPlanDetails(student),
+          getSubscriptionUsage(student._id)
         ]);
 
-        const totalApplications = await getCurrentPlanApplicationCount(student._id);
-        const isLimitReached = typeof planDetails.currentPlanLimit === 'number' && totalApplications >= planDetails.currentPlanLimit;
+        const applicationsUsed = usage.applicationsUsed;
+        const isLimitReached = typeof planDetails.currentPlanLimit === 'number' && applicationsUsed >= planDetails.currentPlanLimit;
 
-        console.log({
-          plan: planDetails.currentPlan,
-          planLimit: planDetails.currentPlanLimit,
-          totalApplications,
+        console.log('[getJob] Lock check:', {
+          studentId: student._id.toString(),
+          currentPlanLimit: planDetails.currentPlanLimit,
+          applicationsUsed,
           isLimitReached
         });
 
@@ -430,6 +427,28 @@ exports.getJob = async (req, res) => {
         }
       }
     }
+
+    // Zone access check (after quota check)
+    let isZoneLocked = false;
+    let zoneLockReason = null;
+
+    if (student && !isDescriptionLocked && isZoneEnforcementEnabled()) {
+      const zoneAccess = await canAccessJob(student._id, jobId);
+      if (!zoneAccess.canAccess) {
+        isZoneLocked = true;
+        const unlockOptions = await getUnlockOptions(zoneAccess.requiredZoneId);
+        zoneLockReason = {
+          zone: {
+            id: zoneAccess.requiredZoneId,
+            name: zoneAccess.zoneName
+          },
+          unlockOptions
+        };
+      }
+    }
+
+    // Combine quota lock and zone lock
+    const isLocked = isDescriptionLocked || isZoneLocked;
 
     // Build query - applied students can view any job, others only approved
     const query = { _id: jobId };
@@ -450,8 +469,8 @@ exports.getJob = async (req, res) => {
     res.json({
       id: jobObj._id,
       title: jobObj.title,
-      description: isDescriptionLocked ? null : jobObj.description,
-      requirements: jobObj.requirements,
+      description: isLocked ? null : jobObj.description,
+      requirements: isLocked ? null : jobObj.requirements,
       location: jobObj.location,
       jobType: jobObj.jobType,
       salaryRange: jobObj.salaryRange,
@@ -472,7 +491,9 @@ exports.getJob = async (req, res) => {
         },
         foundedYear: jobObj.companyId.foundedYear
       } : null,
-      isDescriptionLocked,
+      isDescriptionLocked: isLocked,
+      isZoneLocked,
+      zoneLockReason,
       hasApplied,
       applicationStatus
     });
@@ -502,21 +523,17 @@ exports.applyToJob = async (req, res) => {
       });
     }
 
-    const planDetails = await getCurrentPlanDetails(student);
-    const totalApplications = await getCurrentPlanApplicationCount(student._id);
-    const isLimitReached = typeof planDetails.currentPlanLimit === 'number' && totalApplications >= planDetails.currentPlanLimit;
-
-    console.log({
-      plan: planDetails.currentPlan,
-      planLimit: planDetails.currentPlanLimit,
-      totalApplications,
-      isLimitReached
-    });
+    const [planDetails, usage] = await Promise.all([
+      getCurrentPlanDetails(student),
+      getSubscriptionUsage(student._id)
+    ]);
+    const applicationsUsed = usage.applicationsUsed;
+    const isLimitReached = typeof planDetails.currentPlanLimit === 'number' && applicationsUsed >= planDetails.currentPlanLimit;
 
     if (isLimitReached) {
       return res.status(403).json({
         error: 'Application limit reached. Please upgrade your plan to apply to more jobs.',
-        applicationsUsed: totalApplications,
+        applicationsUsed,
         applicationLimit: planDetails.currentPlanLimit
       });
     }
