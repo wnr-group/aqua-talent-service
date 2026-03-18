@@ -1075,3 +1075,61 @@ exports.getProfileCompleteness = async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 };
+
+exports.getSubscriptionZones = async (req, res) => {
+  try {
+    const student = await Student.findOne({ userId: req.user.userId });
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    const { getAccessibleZones } = require('../services/zoneAccessService');
+    const access = await getAccessibleZones(student._id);
+
+    if (access.allZones) {
+      const Zone = require('../models/Zone');
+      const allZones = await Zone.find().select('name description').lean();
+      return res.json({
+        allZonesIncluded: true,
+        zones: allZones.map(z => ({ id: z._id, name: z.name, description: z.description }))
+      });
+    }
+
+    const Zone = require('../models/Zone');
+    const zones = await Zone.find({ _id: { $in: access.zoneIds } })
+      .select('name description')
+      .lean();
+
+    res.json({
+      allZonesIncluded: false,
+      zones: zones.map(z => ({ id: z._id, name: z.name, description: z.description }))
+    });
+  } catch (error) {
+    console.error('Get subscription zones error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.getZoneAddons = async (req, res) => {
+  try {
+    const Addon = require('../models/Addon');
+    const addons = await Addon.find({ type: 'zone' })
+      .select('name priceINR priceUSD zoneCount unlockAllZones')
+      .sort({ priceINR: 1 })
+      .lean();
+
+    const formattedAddons = addons.map(a => ({
+      id: a._id,
+      name: a.name,
+      priceINR: a.priceINR,
+      priceUSD: a.priceUSD,
+      zoneCount: a.zoneCount,
+      unlockAllZones: a.unlockAllZones
+    }));
+
+    res.json({ addons: formattedAddons });
+  } catch (error) {
+    console.error('Get zone addons error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
