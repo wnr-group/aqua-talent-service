@@ -1947,3 +1947,170 @@ exports.setPlanZones = async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 };
+
+// ===========================
+// Addon Management
+// ===========================
+
+exports.getAddons = async (req, res) => {
+  try {
+    const Addon = require('../models/Addon');
+    const addons = await Addon.find().sort({ type: 1, name: 1 }).lean();
+
+    const formattedAddons = addons.map(a => ({
+      id: a._id,
+      name: a.name,
+      type: a.type,
+      priceINR: a.priceINR,
+      priceUSD: a.priceUSD,
+      zoneCount: a.zoneCount,
+      jobCreditCount: a.jobCreditCount,
+      unlockAllZones: a.unlockAllZones,
+      createdAt: a.createdAt
+    }));
+
+    res.json({ addons: formattedAddons });
+  } catch (error) {
+    console.error('Get addons error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.createAddon = async (req, res) => {
+  try {
+    const Addon = require('../models/Addon');
+    const { name, type, priceINR, priceUSD, zoneCount, jobCreditCount, unlockAllZones } = req.body;
+
+    if (!name || !type) {
+      return res.status(400).json({ error: 'Name and type are required' });
+    }
+
+    if (!['zone', 'jobs'].includes(type)) {
+      return res.status(400).json({ error: 'Type must be zone or jobs' });
+    }
+
+    const existingAddon = await Addon.findOne({ name: name.trim() });
+    if (existingAddon) {
+      return res.status(409).json({ error: 'Addon with this name already exists' });
+    }
+
+    const addonData = {
+      name: name.trim(),
+      type,
+      priceINR: priceINR || null,
+      priceUSD: priceUSD || null
+    };
+
+    if (type === 'zone') {
+      addonData.unlockAllZones = unlockAllZones || false;
+      if (!unlockAllZones) {
+        addonData.zoneCount = zoneCount;
+      }
+    } else if (type === 'jobs') {
+      addonData.jobCreditCount = jobCreditCount;
+    }
+
+    const addon = await Addon.create(addonData);
+
+    res.status(201).json({
+      id: addon._id,
+      name: addon.name,
+      type: addon.type,
+      priceINR: addon.priceINR,
+      priceUSD: addon.priceUSD,
+      zoneCount: addon.zoneCount,
+      jobCreditCount: addon.jobCreditCount,
+      unlockAllZones: addon.unlockAllZones
+    });
+  } catch (error) {
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error('Create addon error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.updateAddon = async (req, res) => {
+  try {
+    const Addon = require('../models/Addon');
+    const { addonId } = req.params;
+    const { name, priceINR, priceUSD, zoneCount, jobCreditCount, unlockAllZones } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(addonId)) {
+      return res.status(400).json({ error: 'Invalid addon ID' });
+    }
+
+    const addon = await Addon.findById(addonId);
+    if (!addon) {
+      return res.status(404).json({ error: 'Addon not found' });
+    }
+
+    if (name !== undefined) {
+      const existingAddon = await Addon.findOne({
+        name: name.trim(),
+        _id: { $ne: addonId }
+      });
+      if (existingAddon) {
+        return res.status(409).json({ error: 'Addon with this name already exists' });
+      }
+      addon.name = name.trim();
+    }
+
+    if (priceINR !== undefined) addon.priceINR = priceINR;
+    if (priceUSD !== undefined) addon.priceUSD = priceUSD;
+
+    if (addon.type === 'zone') {
+      if (unlockAllZones !== undefined) addon.unlockAllZones = unlockAllZones;
+      if (zoneCount !== undefined && !addon.unlockAllZones) addon.zoneCount = zoneCount;
+    } else if (addon.type === 'jobs') {
+      if (jobCreditCount !== undefined) addon.jobCreditCount = jobCreditCount;
+    }
+
+    await addon.save();
+
+    res.json({
+      id: addon._id,
+      name: addon.name,
+      type: addon.type,
+      priceINR: addon.priceINR,
+      priceUSD: addon.priceUSD,
+      zoneCount: addon.zoneCount,
+      jobCreditCount: addon.jobCreditCount,
+      unlockAllZones: addon.unlockAllZones
+    });
+  } catch (error) {
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error('Update addon error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.deleteAddon = async (req, res) => {
+  try {
+    const Addon = require('../models/Addon');
+    const SubscriptionAddon = require('../models/SubscriptionAddon');
+    const { addonId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(addonId)) {
+      return res.status(400).json({ error: 'Invalid addon ID' });
+    }
+
+    const purchaseCount = await SubscriptionAddon.countDocuments({ addonId });
+    if (purchaseCount > 0) {
+      return res.status(400).json({
+        error: 'Cannot delete addon that has been purchased',
+        purchaseCount
+      });
+    }
+
+    await Addon.findByIdAndDelete(addonId);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete addon error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};

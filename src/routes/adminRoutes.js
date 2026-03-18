@@ -50,4 +50,10 @@ router.put('/plans/:planId/zones', adminController.setPlanZones);
 router.get('/config/free-tier', adminController.getFreeTierConfig);
 router.patch('/config/free-tier', adminController.updateFreeTierConfig);
 
+// Addon management
+router.get('/addons', adminController.getAddons);
+router.post('/addons', adminController.createAddon);
+router.patch('/addons/:addonId', adminController.updateAddon);
+router.delete('/addons/:addonId', adminController.deleteAddon);
+
 module.exports = router;
