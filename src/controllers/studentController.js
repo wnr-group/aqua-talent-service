@@ -334,6 +334,7 @@ exports.getJobs = async (req, res) => {
     const [jobs, total] = await Promise.all([
       JobPosting.find(query)
         .populate('companyId', 'name logo industry size website')
+        .populate('countryId', 'zoneId')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNum)
@@ -371,14 +372,44 @@ exports.getJobs = async (req, res) => {
       try {
         const student = await Student.findOne({ userId: req.user.userId });
         if (student) {
-          const zoneAccessPromises = transformedJobs.map(async (job) => {
-            const zoneAccess = await canAccessJob(student._id, job.id);
-            return {
-              ...job,
-              isZoneLocked: !zoneAccess.canAccess
-            };
+          // Batch fetch: get student's accessible zones once
+          const { getAccessibleZones } = require('../services/zoneAccessService');
+          const accessibleZones = await getAccessibleZones(student._id);
+
+          // Batch fetch: get all pay-per-job purchases for this student
+          const PayPerJobPurchase = require('../models/PayPerJobPurchase');
+          const paidJobIds = await PayPerJobPurchase.find({
+            studentId: student._id,
+            status: 'completed'
+          }).distinct('jobPostingId');
+          const paidJobIdSet = new Set(paidJobIds.map(id => id.toString()));
+
+          // Check each job against cached data (no additional queries)
+          jobsWithZoneStatus = transformedJobs.map(job => {
+            // If pay-per-job purchased, not locked
+            if (paidJobIdSet.has(job.id.toString())) {
+              return { ...job, isZoneLocked: false };
+            }
+
+            // If job has no countryId, not locked (handled by job.countryId being undefined)
+            // Note: transformedJobs doesn't include countryId, so we need to check original jobs
+            const originalJob = jobs.find(j => j._id.toString() === job.id.toString());
+            if (!originalJob?.countryId) {
+              return { ...job, isZoneLocked: false };
+            }
+
+            // If student has all zones access, not locked
+            if (accessibleZones.allZones) {
+              return { ...job, isZoneLocked: false };
+            }
+
+            // Check if job's zone is in student's accessible zones
+            const jobZoneId = originalJob.countryId.zoneId?.toString();
+            const hasAccess = jobZoneId && accessibleZones.zoneIds.some(
+              zId => zId.toString() === jobZoneId
+            );
+            return { ...job, isZoneLocked: !hasAccess };
           });
-          jobsWithZoneStatus = await Promise.all(zoneAccessPromises);
         }
       } catch (zoneError) {
         console.error('Zone access check failed for job list:', zoneError);
