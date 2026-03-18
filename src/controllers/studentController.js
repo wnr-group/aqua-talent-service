@@ -392,8 +392,6 @@ exports.getJob = async (req, res) => {
     let student = null;
     let isDescriptionLocked = false;
 
-    console.log('[getJob] req.user:', req.user);
-
     // Check if student has applied to this job
     if (req.user && req.user.userType === 'student') {
       student = await Student.findOne({ userId: req.user.userId });
@@ -409,13 +407,6 @@ exports.getJob = async (req, res) => {
 
         const applicationsUsed = usage.applicationsUsed;
         const isLimitReached = typeof planDetails.currentPlanLimit === 'number' && applicationsUsed >= planDetails.currentPlanLimit;
-
-        console.log('[getJob] Lock check:', {
-          studentId: student._id.toString(),
-          currentPlanLimit: planDetails.currentPlanLimit,
-          applicationsUsed,
-          isLimitReached
-        });
 
         if (isLimitReached) {
           isDescriptionLocked = true;
@@ -433,17 +424,22 @@ exports.getJob = async (req, res) => {
     let zoneLockReason = null;
 
     if (student && !isDescriptionLocked && isZoneEnforcementEnabled()) {
-      const zoneAccess = await canAccessJob(student._id, jobId);
-      if (!zoneAccess.canAccess) {
-        isZoneLocked = true;
-        const unlockOptions = await getUnlockOptions(zoneAccess.requiredZoneId);
-        zoneLockReason = {
-          zone: {
-            id: zoneAccess.requiredZoneId,
-            name: zoneAccess.zoneName
-          },
-          unlockOptions
-        };
+      try {
+        const zoneAccess = await canAccessJob(student._id, jobId);
+        if (!zoneAccess.canAccess) {
+          isZoneLocked = true;
+          const unlockOptions = await getUnlockOptions(zoneAccess.requiredZoneId);
+          zoneLockReason = {
+            zone: {
+              id: zoneAccess.requiredZoneId,
+              name: zoneAccess.zoneName
+            },
+            unlockOptions
+          };
+        }
+      } catch (zoneError) {
+        console.error('Zone access check failed:', zoneError);
+        // Graceful degradation: if zone check fails, allow access
       }
     }
 
