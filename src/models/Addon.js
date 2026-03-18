@@ -34,6 +34,10 @@ const AddonSchema = new mongoose.Schema({
     default: null,
     min: 1
   },
+  unlockAllZones: {
+    type: Boolean,
+    default: false
+  },
   createdAt: {
     type: Date,
     default: Date.now
@@ -54,8 +58,11 @@ AddonSchema.pre('validate', function() {
   }
 
   if (this.type === 'zone') {
-    if (!isPresent(this.zoneCount) || this.zoneCount <= 0) {
-      this.invalidate('zoneCount', 'Zone addon must define zoneCount');
+    // unlockAllZones addons don't need zoneCount
+    if (!this.unlockAllZones) {
+      if (!isPresent(this.zoneCount) || this.zoneCount <= 0) {
+        this.invalidate('zoneCount', 'Zone addon must define zoneCount (unless unlockAllZones)');
+      }
     }
 
     if (isPresent(this.jobCreditCount)) {
@@ -66,5 +73,6 @@ AddonSchema.pre('validate', function() {
 
 AddonSchema.index({ name: 1 }, { unique: true });
 AddonSchema.index({ type: 1 });
+AddonSchema.index({ unlockAllZones: 1 });
 
 module.exports = mongoose.model('Addon', AddonSchema);
