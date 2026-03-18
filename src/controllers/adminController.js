@@ -8,6 +8,9 @@ const AvailableService = require('../models/AvailableService');
 const ActiveSubscription = require('../models/ActiveSubscription');
 const PaymentRecord = require('../models/PaymentRecord');
 const SystemConfig = require('../models/SystemConfig');
+const Zone = require('../models/Zone');
+const ZoneCountry = require('../models/ZoneCountry');
+const PlanZone = require('../models/PlanZone');
 const emailService = require('../services/emailService');
 const notificationService = require('../services/notificationService');
 const {
@@ -1247,7 +1250,8 @@ exports.assignStudentSubscription = async (req, res) => {
       endDate: null,
       status: 'active',
       autoRenew: false,
-      applicationsUsed: 0
+      applicationsUsed: 0,
+      maxApplications: service.maxApplications
     });
 
     // Update student
@@ -1621,6 +1625,325 @@ exports.updateFreeTierConfig = async (req, res) => {
     });
   } catch (error) {
     console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// ─── Zone Management ─────────────────────────────────────────────────────────
+
+exports.getZones = async (req, res) => {
+  try {
+    const zones = await Zone.find().sort({ name: 1 }).lean();
+
+    const zonesWithCountries = await Promise.all(zones.map(async (zone) => {
+      const countries = await ZoneCountry.find({ zoneId: zone._id })
+        .select('_id countryName')
+        .sort({ countryName: 1 })
+        .lean();
+
+      return {
+        id: zone._id,
+        name: zone.name,
+        description: zone.description,
+        countries: countries.map(c => ({ id: c._id, name: c.countryName })),
+        countryCount: countries.length
+      };
+    }));
+
+    res.json({ zones: zonesWithCountries });
+  } catch (error) {
+    console.error('Get zones error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.createZone = async (req, res) => {
+  try {
+    const { name, description } = req.body;
+
+    if (!name || !description) {
+      return res.status(400).json({ error: 'Name and description are required' });
+    }
+
+    const existingZone = await Zone.findOne({ name: name.trim() });
+    if (existingZone) {
+      return res.status(409).json({ error: 'Zone with this name already exists' });
+    }
+
+    const zone = await Zone.create({
+      name: name.trim(),
+      description: description.trim()
+    });
+
+    res.status(201).json({
+      id: zone._id,
+      name: zone.name,
+      description: zone.description,
+      countries: [],
+      countryCount: 0
+    });
+  } catch (error) {
+    console.error('Create zone error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.updateZone = async (req, res) => {
+  try {
+    const { zoneId } = req.params;
+    const { name, description } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(zoneId)) {
+      return res.status(400).json({ error: 'Invalid zone ID' });
+    }
+
+    const zone = await Zone.findById(zoneId);
+    if (!zone) {
+      return res.status(404).json({ error: 'Zone not found' });
+    }
+
+    if (name !== undefined) {
+      const existingZone = await Zone.findOne({
+        name: name.trim(),
+        _id: { $ne: zoneId }
+      });
+      if (existingZone) {
+        return res.status(409).json({ error: 'Zone with this name already exists' });
+      }
+      zone.name = name.trim();
+    }
+
+    if (description !== undefined) {
+      zone.description = description.trim();
+    }
+
+    await zone.save();
+
+    res.json({
+      id: zone._id,
+      name: zone.name,
+      description: zone.description
+    });
+  } catch (error) {
+    console.error('Update zone error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.deleteZone = async (req, res) => {
+  try {
+    const { zoneId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(zoneId)) {
+      return res.status(400).json({ error: 'Invalid zone ID' });
+    }
+
+    const planCount = await PlanZone.countDocuments({ zoneId });
+    if (planCount > 0) {
+      return res.status(400).json({
+        error: 'Cannot delete zone that is assigned to plans',
+        planCount
+      });
+    }
+
+    const countries = await ZoneCountry.find({ zoneId }).select('_id');
+    const countryIds = countries.map(c => c._id);
+
+    const JobPosting = require('../models/JobPosting');
+    const jobCount = await JobPosting.countDocuments({ countryId: { $in: countryIds } });
+    if (jobCount > 0) {
+      return res.status(400).json({
+        error: 'Cannot delete zone with countries that have jobs assigned',
+        jobCount
+      });
+    }
+
+    await ZoneCountry.deleteMany({ zoneId });
+    await Zone.findByIdAndDelete(zoneId);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete zone error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.addCountryToZone = async (req, res) => {
+  try {
+    const { zoneId } = req.params;
+    const { countryName } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(zoneId)) {
+      return res.status(400).json({ error: 'Invalid zone ID' });
+    }
+
+    if (!countryName || typeof countryName !== 'string') {
+      return res.status(400).json({ error: 'Country name is required' });
+    }
+
+    const zone = await Zone.findById(zoneId);
+    if (!zone) {
+      return res.status(404).json({ error: 'Zone not found' });
+    }
+
+    const existingCountry = await ZoneCountry.findOne({
+      countryName: countryName.trim()
+    });
+    if (existingCountry) {
+      return res.status(409).json({
+        error: 'Country already exists',
+        existingZoneId: existingCountry.zoneId
+      });
+    }
+
+    const country = await ZoneCountry.create({
+      zoneId,
+      countryName: countryName.trim()
+    });
+
+    res.status(201).json({
+      id: country._id,
+      name: country.countryName,
+      zoneId: country.zoneId
+    });
+  } catch (error) {
+    console.error('Add country to zone error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.removeCountryFromZone = async (req, res) => {
+  try {
+    const { zoneId, countryId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(zoneId) || !mongoose.Types.ObjectId.isValid(countryId)) {
+      return res.status(400).json({ error: 'Invalid zone or country ID' });
+    }
+
+    const country = await ZoneCountry.findOne({ _id: countryId, zoneId });
+    if (!country) {
+      return res.status(404).json({ error: 'Country not found in this zone' });
+    }
+
+    const JobPosting = require('../models/JobPosting');
+    const jobCount = await JobPosting.countDocuments({ countryId });
+    if (jobCount > 0) {
+      return res.status(400).json({
+        error: 'Cannot remove country that has jobs assigned',
+        jobCount
+      });
+    }
+
+    await ZoneCountry.findByIdAndDelete(countryId);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Remove country from zone error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.getPlanZones = async (req, res) => {
+  try {
+    const { planId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(planId)) {
+      return res.status(400).json({ error: 'Invalid plan ID' });
+    }
+
+    const AvailableService = require('../models/AvailableService');
+    const plan = await AvailableService.findById(planId);
+    if (!plan) {
+      return res.status(404).json({ error: 'Plan not found' });
+    }
+
+    const planZones = await PlanZone.find({ planId })
+      .populate('zoneId', 'name description')
+      .lean();
+
+    const zones = planZones
+      .filter(pz => pz.zoneId)
+      .map(pz => ({
+        id: pz.zoneId._id,
+        name: pz.zoneId.name,
+        description: pz.zoneId.description
+      }));
+
+    res.json({
+      planId,
+      planName: plan.name,
+      allZonesIncluded: plan.allZonesIncluded,
+      zones
+    });
+  } catch (error) {
+    console.error('Get plan zones error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.setPlanZones = async (req, res) => {
+  try {
+    const { planId } = req.params;
+    const { zoneIds, allZonesIncluded } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(planId)) {
+      return res.status(400).json({ error: 'Invalid plan ID' });
+    }
+
+    const AvailableService = require('../models/AvailableService');
+    const plan = await AvailableService.findById(planId);
+    if (!plan) {
+      return res.status(404).json({ error: 'Plan not found' });
+    }
+
+    if (typeof allZonesIncluded === 'boolean') {
+      plan.allZonesIncluded = allZonesIncluded;
+      await plan.save();
+    }
+
+    if (plan.allZonesIncluded) {
+      await PlanZone.deleteMany({ planId });
+      return res.json({
+        planId,
+        planName: plan.name,
+        allZonesIncluded: true,
+        zones: []
+      });
+    }
+
+    if (!Array.isArray(zoneIds)) {
+      return res.status(400).json({ error: 'zoneIds must be an array' });
+    }
+
+    const validZoneIds = zoneIds.filter(id => mongoose.Types.ObjectId.isValid(id));
+    const zones = await Zone.find({ _id: { $in: validZoneIds } });
+
+    if (zones.length !== validZoneIds.length) {
+      return res.status(400).json({ error: 'Some zone IDs are invalid' });
+    }
+
+    await PlanZone.deleteMany({ planId });
+
+    if (validZoneIds.length > 0) {
+      const planZonesDocs = validZoneIds.map(zoneId => ({
+        planId,
+        zoneId
+      }));
+      await PlanZone.insertMany(planZonesDocs);
+    }
+
+    res.json({
+      planId,
+      planName: plan.name,
+      allZonesIncluded: plan.allZonesIncluded,
+      zones: zones.map(z => ({
+        id: z._id,
+        name: z.name,
+        description: z.description
+      }))
+    });
+  } catch (error) {
+    console.error('Set plan zones error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 };
