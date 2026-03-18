@@ -364,8 +364,30 @@ exports.getJobs = async (req, res) => {
       };
     });
 
+    // After transformedJobs is created, add zone lock status
+    let jobsWithZoneStatus = transformedJobs;
+
+    if (req.user && req.user.userType === 'student' && isZoneEnforcementEnabled()) {
+      try {
+        const student = await Student.findOne({ userId: req.user.userId });
+        if (student) {
+          const zoneAccessPromises = transformedJobs.map(async (job) => {
+            const zoneAccess = await canAccessJob(student._id, job.id);
+            return {
+              ...job,
+              isZoneLocked: !zoneAccess.canAccess
+            };
+          });
+          jobsWithZoneStatus = await Promise.all(zoneAccessPromises);
+        }
+      } catch (zoneError) {
+        console.error('Zone access check failed for job list:', zoneError);
+        // Graceful degradation: return jobs without zone lock info
+      }
+    }
+
     res.json({
-      jobs: transformedJobs,
+      jobs: jobsWithZoneStatus,
       pagination: {
         page: pageNum,
         limit: limitNum,
