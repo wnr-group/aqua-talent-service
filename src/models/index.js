@@ -9,6 +9,7 @@ module.exports = {
   PaymentRecord: require('./PaymentRecord'),
   NotificationPreference: require('./NotificationPreference'),
   Notification: require('./Notification'),
-  PasswordResetToken: require('./PasswordResetToken')
+  PasswordResetToken: require('./PasswordResetToken'),
+  PayPerJobPurchase: require('./PayPerJobPurchase')
 };
 
