@@ -71,7 +71,7 @@ const canAccessJob = async (studentId, jobPostingId) => {
     return { canAccess: true, source: 'pay-per-job' };
   }
 
-  const job = await JobPosting.findById(jobPostingId).populate('countryId');
+  const job = await JobPosting.findById(jobPostingId).populate('countryId', 'zoneId');
 
   // Jobs without country set are accessible to all
   if (!job || !job.countryId) {
@@ -102,11 +102,7 @@ const canAccessJob = async (studentId, jobPostingId) => {
 
 const getUnlockOptions = async (zoneId) => {
   const addons = await Addon.find({
-    type: 'zone',
-    $or: [
-      { zoneCount: { $gte: 1 } },
-      { unlockAllZones: true }
-    ]
+    type: 'zone'
   }).select('name priceINR priceUSD zoneCount unlockAllZones').lean();
 
   const options = [];
