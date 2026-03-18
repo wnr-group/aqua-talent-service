@@ -587,6 +587,30 @@ exports.applyToJob = async (req, res) => {
       });
     }
 
+    // Zone access check
+    if (isZoneEnforcementEnabled()) {
+      try {
+        const zoneAccess = await canAccessJob(student._id, jobId);
+        if (!zoneAccess.canAccess) {
+          const unlockOptions = await getUnlockOptions(zoneAccess.requiredZoneId);
+          return res.status(403).json({
+            error: 'This job is in a zone not included in your plan.',
+            isZoneLocked: true,
+            zoneLockReason: {
+              zone: {
+                id: zoneAccess.requiredZoneId,
+                name: zoneAccess.zoneName
+              },
+              unlockOptions
+            }
+          });
+        }
+      } catch (zoneError) {
+        console.error('Zone access check failed in applyToJob:', zoneError);
+        // If zone check fails, allow the application to proceed (graceful degradation)
+      }
+    }
+
     const existingApp = await Application.findOne({
       studentId: student._id,
       jobPostingId: jobId
