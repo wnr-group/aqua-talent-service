@@ -10,7 +10,7 @@ const AvailableService = require('../models/AvailableService');
 const ActiveSubscription = require('../models/ActiveSubscription');
 const PasswordResetToken = require('../models/PasswordResetToken');
 const {
-  companyRegistrationSchema,
+  companyRegisterSchema,
   studentRegistrationSchema,
   forgotPasswordSchema,
   verifyResetTokenSchema,
@@ -257,7 +257,7 @@ exports.getMe = async (req, res) => {
 
 exports.registerCompany = async (req, res) => {
   try {
-    const parsed = companyRegistrationSchema.parse(req.body);
+    const parsed = companyRegisterSchema.parse(req.body);
 
     const { companyName, username, email, password } = parsed;
 
@@ -349,15 +349,18 @@ exports.registerStudent = async (req, res) => {
     // Get or create the free plan
     const freePlan = await AvailableService.getFreePlan();
 
+    const studentId = `STU-${Date.now()}`;
+
     // Create student first (without subscription)
     const student = await Student.create({
-      userId: user._id,
-      fullName,
-      email,
-      profileLink: profileLink || null,
-      isHired: false,
-      subscriptionTier: 'free'
-    });
+  userId: user._id,
+  studentId,
+  fullName,
+  email,
+  profileLink: profileLink || null,
+  isHired: false,
+  subscriptionTier: 'free'
+});
 
     // Create free subscription with student ID
     const freeSubscription = await ActiveSubscription.create({

@@ -7,22 +7,56 @@ const {
   COMPANY_SIZES
 } = require('../constants');
 
-const companyRegistrationSchema = z.object({
-  companyName: z.string()
-    .min(2)
-    .max(100)
-    .trim(),
+const blockedDomains = [
+  "gmail.com",
+  "yahoo.com",
+  "outlook.com",
+  "hotmail.com"
+];
 
-  username: z.string()
-    .min(3)
-    .max(30)
-    .regex(/^[a-z0-9_]+$/)
-    .transform(v => v.toLowerCase()),
+const companyRegisterSchema = z
+  .object({
+    companyName: z
+      .string()
+      .min(2, "Company name must be at least 2 characters"),
 
-  email: z.string().email(),
+    username: z
+      .string()
+      .min(3, "Username must be at least 3 characters"),
 
-  password: z.string().min(8)
-});
+    email: z
+      .string()
+      .email("Invalid email address"),
+
+    companyDomain: z
+      .string()
+      .min(3, "Company domain is required")
+      .regex(/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/, "Invalid domain format"),
+
+    password: z
+      .string()
+      .min(8, "Password must be at least 8 characters"),
+
+    confirmPassword: z.string()
+  })
+  .refine((data) => data.password === data.confirmPassword, {
+    message: "Passwords do not match",
+    path: ["confirmPassword"]
+  })
+  .refine((data) => {
+    const emailDomain = data.email.split("@")[1]?.toLowerCase();
+    return !blockedDomains.includes(emailDomain);
+  }, {
+    message: "Please use an official company email address",
+    path: ["email"]
+  })
+  .refine((data) => {
+    const emailDomain = data.email.split("@")[1]?.toLowerCase();
+    return emailDomain === data.companyDomain.toLowerCase();
+  }, {
+    message: "Email domain must match the company domain",
+    path: ["companyDomain"]
+  });
 
 const studentRegistrationSchema = z.object({
   fullName: z.string()
@@ -196,7 +230,7 @@ const resetPasswordSchema = z.object({
 });
 
 module.exports = {
-  companyRegistrationSchema,
+  companyRegisterSchema,
   studentRegistrationSchema,
   createJobSchema,
   createDraftJobSchema,

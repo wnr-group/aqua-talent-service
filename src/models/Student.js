@@ -69,6 +69,14 @@ const StudentSchema = new mongoose.Schema({
     required: true,
     unique: true
   },
+  studentId: {
+    type: String,
+    required: true,
+    unique: true,    
+    trim: true,
+    minlength: 3,
+    maxlength: 30
+  },
   fullName: {
     type: String,
     required: true,
