@@ -4,7 +4,6 @@ const Student = require('../models/Student');
 const Application = require('../models/Application');
 const AvailableService = require('../models/AvailableService');
 const ActiveSubscription = require('../models/ActiveSubscription');
-const Company = require('../models/Company');
 const PaymentRecord = require('../models/PaymentRecord');
 const { checkSubscriptionStatus, getApplicationLimit } = require('../services/subscriptionService');
 const { getSubscriptionUsage } = require('../services/applicationService');
@@ -122,7 +121,6 @@ const createOrUpgradeSubscriptionForStudent = async ({
   paymentMethod = 'manual',
   currency = 'USD',
   gatewayResponse = null,
-  companyId = null,
   createPaymentRecord = true,
   paymentAmount = null
 }) => {
@@ -148,22 +146,16 @@ const createOrUpgradeSubscriptionForStudent = async ({
 
   // Mark previous subscription as exhausted if exists
   if (student.currentSubscriptionId) {
-    const currentSub = await ActiveSubscription.findById(student.currentSubscriptionId)
-      .populate('serviceId', 'tier');
-
-    if (currentSub && currentSub.serviceId?.tier !== 'free') {
-      await ActiveSubscription.updateOne(
-        { _id: student.currentSubscriptionId, studentId: student._id, status: { $in: ['active', 'pending'] } },
-        { $set: { status: 'exhausted', autoRenew: false } }
-      );
-    }
+    await ActiveSubscription.updateOne(
+      { _id: student.currentSubscriptionId, studentId: student._id, status: { $in: ['active', 'pending'] } },
+      { $set: { status: 'exhausted', autoRenew: false } }
+    );
   }
 
   // Create new subscription with fresh application quota (applicationsUsed = 0)
   const subscription = await ActiveSubscription.create({
     studentId: student._id,
     serviceId: service._id,
-    companyId,
     startDate: now,
     endDate: null, // Quota-based, not time-based
     status: 'active',
@@ -178,7 +170,6 @@ const createOrUpgradeSubscriptionForStudent = async ({
       studentId: student._id,
       serviceId: service._id,
       subscriptionId: subscription._id,
-      companyId,
       amount: paymentAmount ?? service.price,
       currency: String(currency || 'USD').toUpperCase(),
       paymentDate: now,
@@ -225,16 +216,11 @@ exports.createOrUpgradeSubscription = async (req, res) => {
       autoRenew = false,
       paymentMethod = 'manual',
       currency = 'USD',
-      gatewayResponse = null,
-      companyId = null
+      gatewayResponse = null
     } = req.body;
 
     if (serviceId && !mongoose.Types.ObjectId.isValid(serviceId)) {
       return res.status(400).json({ error: 'Invalid service ID format' });
-    }
-
-    if (companyId && !mongoose.Types.ObjectId.isValid(companyId)) {
-      return res.status(400).json({ error: 'Invalid company ID format' });
     }
 
     const student = await Student.findOne({ userId: req.user.userId });
@@ -255,18 +241,6 @@ exports.createOrUpgradeSubscription = async (req, res) => {
       return res.status(404).json({ error: 'Subscription service not found. Please configure the Pro plan or provide a valid serviceId.' });
     }
 
-    if (service.isCompanySpotlight && !companyId) {
-      return res.status(400).json({ error: 'companyId is required for spotlight subscriptions' });
-    }
-
-    if (companyId) {
-      const companyExists = await Company.exists({ _id: companyId });
-
-      if (!companyExists) {
-        return res.status(404).json({ error: 'Company not found' });
-      }
-    }
-
     const result = await createOrUpgradeSubscriptionForStudent({
       student,
       service,
@@ -274,7 +248,6 @@ exports.createOrUpgradeSubscription = async (req, res) => {
       paymentMethod,
       currency,
       gatewayResponse,
-      companyId,
       createPaymentRecord: true,
       paymentAmount: service.price
     });

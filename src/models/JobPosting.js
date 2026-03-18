@@ -32,6 +32,11 @@ const JobPostingSchema = new mongoose.Schema({
     trim: true,
     default: null
   },
+  countryId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'ZoneCountry',
+    default: null
+  },
   jobType: {
     type: String,
     required: false,
@@ -70,6 +75,7 @@ const JobPostingSchema = new mongoose.Schema({
 JobPostingSchema.index({ companyId: 1 });
 JobPostingSchema.index({ status: 1 });
 JobPostingSchema.index({ createdAt: -1 });
+JobPostingSchema.index({ countryId: 1 });
 JobPostingSchema.index({ title: 'text', description: 'text' }); // For search
 
 module.exports = mongoose.model('JobPosting', JobPostingSchema);

@@ -1,5 +1,8 @@
 const mongoose = require('mongoose');
 
+const FREE_TIER_PLAN_NAME = 'Free Tier';
+const FREE_TIER_MAX_APPLICATIONS = 2;
+
 const AvailableServiceSchema = new mongoose.Schema({
   name: {
     type: String,
@@ -131,13 +134,13 @@ const AvailableServiceSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
-  isCompanySpotlight: {
-    type: Boolean,
-    default: false
-  },
   isActive: {
     type: Boolean,
     default: true
+  },
+  allZonesIncluded: {
+    type: Boolean,
+    default: false
   },
   createdAt: {
     type: Date,
@@ -160,21 +163,70 @@ AvailableServiceSchema.index({ tier: 1 });
 
 // Static method to get or create the free plan
 AvailableServiceSchema.statics.getFreePlan = async function() {
-  let freePlan = await this.findOne({ tier: 'free' });
+  let freePlan = await this.findOne({ tier: 'free' }).sort({ createdAt: 1 });
+
+  const freePlanDefaults = {
+    name: FREE_TIER_PLAN_NAME,
+    tier: 'free',
+    description: 'Basic access to job listings and limited applications',
+    maxApplications: FREE_TIER_MAX_APPLICATIONS,
+    price: 0,
+    currency: 'USD',
+    billingCycle: 'one-time',
+    features: ['Basic job search', 'Limited applications', 'Profile creation'],
+    isActive: true,
+    allZonesIncluded: true,
+    displayOrder: 0
+  };
 
   if (!freePlan) {
-    freePlan = await this.create({
-      name: 'Free',
-      tier: 'free',
-      description: 'Basic access to job listings and limited applications',
-      maxApplications: null, // Will use SystemConfig value
-      price: 0,
-      currency: 'USD',
-      billingCycle: 'one-time',
-      features: ['Basic job search', 'Limited applications', 'Profile creation'],
-      isActive: true,
-      displayOrder: 0
-    });
+    freePlan = await this.create(freePlanDefaults);
+  } else {
+    let hasUpdates = false;
+
+    if (freePlan.maxApplications !== FREE_TIER_MAX_APPLICATIONS) {
+      freePlan.maxApplications = FREE_TIER_MAX_APPLICATIONS;
+      hasUpdates = true;
+    }
+
+    if (freePlan.price !== 0) {
+      freePlan.price = 0;
+      hasUpdates = true;
+    }
+
+    if (freePlan.billingCycle !== 'one-time') {
+      freePlan.billingCycle = 'one-time';
+      hasUpdates = true;
+    }
+
+    if (!freePlan.name || freePlan.name.trim().length === 0) {
+      freePlan.name = freePlanDefaults.name;
+      hasUpdates = true;
+    }
+
+    if (!freePlan.description || freePlan.description.trim().length === 0) {
+      freePlan.description = freePlanDefaults.description;
+      hasUpdates = true;
+    }
+
+    if (!Array.isArray(freePlan.features) || freePlan.features.length === 0) {
+      freePlan.features = freePlanDefaults.features;
+      hasUpdates = true;
+    }
+
+    if (!freePlan.isActive) {
+      freePlan.isActive = true;
+      hasUpdates = true;
+    }
+
+    if (!freePlan.allZonesIncluded) {
+      freePlan.allZonesIncluded = true;
+      hasUpdates = true;
+    }
+
+    if (hasUpdates) {
+      await freePlan.save();
+    }
   }
 
   return freePlan;

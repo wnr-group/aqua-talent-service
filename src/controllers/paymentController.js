@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const geoip = require('geoip-lite');
 
 const Student = require('../models/Student');
-const Company = require('../models/Company');
+const ActiveSubscription = require('../models/ActiveSubscription');
 const AvailableService = require('../models/AvailableService');
 const PaymentRecord = require('../models/PaymentRecord');
 const {
@@ -156,7 +156,7 @@ const activateSubscriptionForPaymentRecord = async ({
 
     await paymentRecord.save();
 
-    console.log('Subscription already exists:', String(paymentRecord.subscriptionId));
+    console.log('Subscription already activated (idempotent skip):', String(paymentRecord.subscriptionId));
 
     return {
       alreadyProcessed: true,
@@ -183,14 +183,6 @@ const activateSubscriptionForPaymentRecord = async ({
     throw new Error('Subscription service not found for payment record');
   }
 
-  if (paymentRecord.companyId) {
-    const companyExists = await Company.exists({ _id: paymentRecord.companyId });
-
-    if (!companyExists) {
-      throw new Error('Company not found for payment record');
-    }
-  }
-
   // Create quota-based subscription
   const result = await createOrUpgradeSubscriptionForStudent({
     student,
@@ -205,7 +197,6 @@ const activateSubscriptionForPaymentRecord = async ({
       method: paymentMethod,
       ...paymentDetails
     },
-    companyId: paymentRecord.companyId,
     createPaymentRecord: false,
     paymentAmount: paymentRecord.amount
   });
@@ -273,7 +264,7 @@ exports.createOrder = async (req, res) => {
       });
     }
 
-    const { serviceId, companyId = null } = req.body || {};
+    const { serviceId } = req.body || {};
     const currency = normalizeCurrency(req.body?.currency, 'INR');
 
     if (!serviceId || !mongoose.Types.ObjectId.isValid(serviceId)) {
@@ -282,10 +273,6 @@ exports.createOrder = async (req, res) => {
 
     if (!currency) {
       return res.status(400).json({ error: 'currency must be INR or USD' });
-    }
-
-    if (companyId && !mongoose.Types.ObjectId.isValid(companyId)) {
-      return res.status(400).json({ error: 'Invalid company ID format' });
     }
 
     const student = await Student.findOne({ userId: req.user.userId });
@@ -298,18 +285,6 @@ exports.createOrder = async (req, res) => {
 
     if (!service) {
       return res.status(404).json({ error: 'Subscription service not found' });
-    }
-
-    if (service.isCompanySpotlight && !companyId) {
-      return res.status(400).json({ error: 'companyId is required for spotlight subscriptions' });
-    }
-
-    if (companyId) {
-      const companyExists = await Company.exists({ _id: companyId });
-
-      if (!companyExists) {
-        return res.status(404).json({ error: 'Company not found' });
-      }
     }
 
     const selectedPrice = getServicePrice(service, currency);
@@ -328,7 +303,6 @@ exports.createOrder = async (req, res) => {
     const existingPendingOrder = await PaymentRecord.findOne({
       studentId: student._id,
       serviceId: service._id,
-      companyId: companyId || null,
       currency,
       status: 'pending'
     }).sort({ createdAt: -1 });
@@ -377,8 +351,7 @@ exports.createOrder = async (req, res) => {
       receipt: buildReceipt(service._id),
       notes: {
         serviceId: String(service._id),
-        studentId: String(student._id),
-        companyId: companyId ? String(companyId) : ''
+        studentId: String(student._id)
       }
     });
 
@@ -386,7 +359,6 @@ exports.createOrder = async (req, res) => {
       studentId: student._id,
       serviceId: service._id,
       subscriptionId: null,
-      companyId,
       amount: selectedPrice,
       currency,
       paymentDate: new Date(),
@@ -497,7 +469,7 @@ exports.verifyPayment = async (req, res) => {
           console.error('Failed to fetch payment details:', fetchError.message);
         }
 
-        await activateSubscriptionForPaymentRecord({
+        const activationResult = await activateSubscriptionForPaymentRecord({
           paymentRecord,
           razorpayPaymentId,
           paymentMethod,
@@ -505,6 +477,30 @@ exports.verifyPayment = async (req, res) => {
           source: 'checkout',
           eventName: 'payment.verified'
         });
+
+        if (activationResult.subscriptionId) {
+          const activatedSubscription = await ActiveSubscription.findById(activationResult.subscriptionId)
+            .populate('serviceId', 'name tier maxApplications');
+
+          if (activatedSubscription) {
+            return res.json({
+              success: true,
+              message: 'Payment verified and subscription activated',
+              payment: {
+                razorpay_order_id: razorpayOrderId,
+                razorpay_payment_id: razorpayPaymentId
+              },
+              subscription: {
+                id: activatedSubscription._id,
+                plan: activatedSubscription.serviceId?.name || null,
+                tier: activatedSubscription.serviceId?.tier || null,
+                maxApplications: activatedSubscription.serviceId?.maxApplications || null,
+                status: activatedSubscription.status,
+                startDate: activatedSubscription.startDate
+              }
+            });
+          }
+        }
       }
     }
 
@@ -608,5 +604,288 @@ exports.handleWebhook = async (req, res) => {
   } catch (error) {
     console.error('Razorpay webhook error:', error);
     return res.status(200).json({ received: true });
+  }
+};
+
+exports.purchaseZoneAddon = async (req, res) => {
+  try {
+    const { addonId, zoneIds, currency = 'INR' } = req.body;
+
+    const student = await Student.findOne({ userId: req.user.userId });
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    if (!student.currentSubscriptionId) {
+      return res.status(400).json({ error: 'No active subscription' });
+    }
+
+    const Addon = require('../models/Addon');
+    const addon = await Addon.findById(addonId);
+    if (!addon || addon.type !== 'zone') {
+      return res.status(400).json({ error: 'Invalid zone addon' });
+    }
+
+    // Validate zone selection for non-unlockAllZones addons
+    if (!addon.unlockAllZones) {
+      if (!Array.isArray(zoneIds) || zoneIds.length !== addon.zoneCount) {
+        return res.status(400).json({
+          error: `Must select exactly ${addon.zoneCount} zone(s)`
+        });
+      }
+
+      const { getAccessibleZones } = require('../services/zoneAccessService');
+      const access = await getAccessibleZones(student._id);
+
+      if (access.allZones) {
+        return res.status(400).json({ error: 'You already have access to all zones' });
+      }
+
+      const Zone = require('../models/Zone');
+      const zones = await Zone.find({ _id: { $in: zoneIds } });
+      if (zones.length !== zoneIds.length) {
+        return res.status(400).json({ error: 'Invalid zone ID(s)' });
+      }
+
+      const alreadyAccessible = zoneIds.filter(zId =>
+        access.zoneIds.some(aId => aId.toString() === zId.toString())
+      );
+      if (alreadyAccessible.length > 0) {
+        return res.status(400).json({ error: 'Some zones are already accessible' });
+      }
+    }
+
+    const amount = currency === 'INR' ? addon.priceINR : addon.priceUSD;
+    if (!amount) {
+      return res.status(400).json({ error: 'Addon price not configured for this currency' });
+    }
+
+    const razorpay = getRazorpayInstance();
+    const order = await razorpay.orders.create({
+      amount: Math.round(amount * 100),
+      currency,
+      notes: {
+        type: 'zone_addon',
+        studentId: student._id.toString(),
+        addonId: addon._id.toString(),
+        zoneIds: addon.unlockAllZones ? 'all' : JSON.stringify(zoneIds)
+      }
+    });
+
+    res.json({
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      addon: { id: addon._id, name: addon.name }
+    });
+  } catch (error) {
+    console.error('Purchase zone addon error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.verifyZoneAddonPayment = async (req, res) => {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+
+    const generated_signature = crypto
+      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .update(razorpay_order_id + '|' + razorpay_payment_id)
+      .digest('hex');
+
+    if (generated_signature !== razorpay_signature) {
+      return res.status(400).json({ error: 'Invalid payment signature' });
+    }
+
+    const razorpay = getRazorpayInstance();
+    const order = await razorpay.orders.fetch(razorpay_order_id);
+
+    if (order.notes.type !== 'zone_addon') {
+      return res.status(400).json({ error: 'Invalid order type' });
+    }
+
+    const studentId = order.notes.studentId;
+    const addonId = order.notes.addonId;
+    const zoneIdsStr = order.notes.zoneIds;
+
+    const student = await Student.findById(studentId);
+    const Addon = require('../models/Addon');
+    const addon = await Addon.findById(addonId);
+
+    const paymentRecord = await PaymentRecord.create({
+      studentId,
+      serviceId: null,
+      subscriptionId: student.currentSubscriptionId,
+      amount: order.amount / 100,
+      currency: order.currency,
+      paymentDate: new Date(),
+      status: 'completed',
+      transactionId: razorpay_payment_id,
+      paymentMethod: 'razorpay',
+      gatewayResponse: { orderId: razorpay_order_id }
+    });
+
+    const SubscriptionAddon = require('../models/SubscriptionAddon');
+    await SubscriptionAddon.create({
+      subscriptionId: student.currentSubscriptionId,
+      addonId,
+      paymentRecordId: paymentRecord._id,
+      quantity: 1
+    });
+
+    if (!addon.unlockAllZones && zoneIdsStr !== 'all') {
+      const zoneIds = JSON.parse(zoneIdsStr);
+      const SubscriptionZone = require('../models/SubscriptionZone');
+
+      for (const zoneId of zoneIds) {
+        await SubscriptionZone.findOneAndUpdate(
+          { subscriptionId: student.currentSubscriptionId, zoneId },
+          {
+            $setOnInsert: {
+              subscriptionId: student.currentSubscriptionId,
+              zoneId,
+              source: 'addon',
+              createdAt: new Date()
+            }
+          },
+          { upsert: true }
+        );
+      }
+    }
+
+    res.json({ success: true, paymentId: razorpay_payment_id });
+  } catch (error) {
+    console.error('Verify zone addon payment error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.initiatePayPerJob = async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const { currency = 'INR' } = req.body;
+
+    const student = await Student.findOne({ userId: req.user.userId });
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    const JobPosting = require('../models/JobPosting');
+    const job = await JobPosting.findById(jobId);
+    if (!job || job.status !== 'approved') {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    const PayPerJobPurchase = require('../models/PayPerJobPurchase');
+    const existingPurchase = await PayPerJobPurchase.findOne({
+      studentId: student._id,
+      jobPostingId: jobId,
+      status: 'completed'
+    });
+    if (existingPurchase) {
+      return res.status(400).json({ error: 'You have already purchased access to this job' });
+    }
+
+    const amount = currency === 'INR' ? 2500 : 35;
+
+    let purchase = await PayPerJobPurchase.findOne({
+      studentId: student._id,
+      jobPostingId: jobId,
+      status: { $in: ['pending', 'failed'] }
+    });
+
+    const razorpay = getRazorpayInstance();
+    const order = await razorpay.orders.create({
+      amount: Math.round(amount * 100),
+      currency,
+      notes: {
+        type: 'pay_per_job',
+        studentId: student._id.toString(),
+        jobPostingId: jobId
+      }
+    });
+
+    if (purchase) {
+      purchase.amount = amount;
+      purchase.currency = currency;
+      purchase.razorpayOrderId = order.id;
+      purchase.status = 'pending';
+      await purchase.save();
+    } else {
+      purchase = await PayPerJobPurchase.create({
+        studentId: student._id,
+        jobPostingId: jobId,
+        amount,
+        currency,
+        razorpayOrderId: order.id,
+        status: 'pending'
+      });
+    }
+
+    res.json({
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      purchaseId: purchase._id,
+      job: { id: job._id, title: job.title }
+    });
+  } catch (error) {
+    console.error('Initiate pay per job error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.verifyPayPerJob = async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+
+    const generated_signature = crypto
+      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .update(razorpay_order_id + '|' + razorpay_payment_id)
+      .digest('hex');
+
+    if (generated_signature !== razorpay_signature) {
+      return res.status(400).json({ error: 'Invalid payment signature' });
+    }
+
+    const student = await Student.findOne({ userId: req.user.userId });
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    const PayPerJobPurchase = require('../models/PayPerJobPurchase');
+    const purchase = await PayPerJobPurchase.findOne({
+      studentId: student._id,
+      jobPostingId: jobId,
+      razorpayOrderId: razorpay_order_id
+    });
+
+    if (!purchase) {
+      return res.status(404).json({ error: 'Purchase not found' });
+    }
+
+    const paymentRecord = await PaymentRecord.create({
+      studentId: student._id,
+      serviceId: null,
+      subscriptionId: null,
+      amount: purchase.amount,
+      currency: purchase.currency,
+      paymentDate: new Date(),
+      status: 'completed',
+      transactionId: razorpay_payment_id,
+      paymentMethod: 'razorpay',
+      gatewayResponse: { orderId: razorpay_order_id, type: 'pay_per_job' }
+    });
+
+    purchase.status = 'completed';
+    purchase.completedAt = new Date();
+    purchase.paymentRecordId = paymentRecord._id;
+    await purchase.save();
+
+    res.json({ success: true, paymentId: razorpay_payment_id });
+  } catch (error) {
+    console.error('Verify pay per job error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 };
