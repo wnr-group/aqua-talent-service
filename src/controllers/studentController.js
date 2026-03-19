@@ -91,6 +91,7 @@ const normalizeDate = (value) => {
 const buildProfileResponse = (student) => ({
   fullName: student.fullName,
   email: student.email,
+  isDGShipping: student.isDGShipping || 'no',
   profileLink: student.profileLink || '',
   bio: student.bio || '',
   location: student.location || '',
@@ -624,9 +625,9 @@ exports.withdrawApplication = async (req, res) => {
 exports.getProfile = async (req, res) => {
   try {
     const student = await Student.findOne(
-      { userId: req.user.userId },
-      'fullName email profileLink bio location availableFrom skills education experience resumeUrl introVideoUrl isHired'
-    );
+  { userId: req.user.userId },
+  'fullName email isDGShipping profileLink bio location availableFrom skills education experience resumeUrl introVideoUrl isHired'
+);
 
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
@@ -645,6 +646,7 @@ exports.updateProfile = async (req, res) => {
     const {
       fullName,
       email,
+      isDGShipping,
       profileLink,
       bio,
       location,
@@ -682,6 +684,15 @@ exports.updateProfile = async (req, res) => {
       student.email = email.toLowerCase();
       hasUpdates = true;
     }
+
+    if (isDGShipping !== undefined) {
+  if (!['yes', 'no'].includes(isDGShipping)) {
+    return res.status(400).json({ error: 'Invalid value for DG Shipping' });
+  }
+
+  student.isDGShipping = isDGShipping;
+  hasUpdates = true;
+}
 
     if (profileLink !== undefined) {
       if (profileLink && profileLink.length > 500) {

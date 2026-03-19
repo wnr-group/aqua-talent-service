@@ -107,9 +107,9 @@ const uploadStudentResume = async (file) => {
 
   assertBucketConfigured();
 
-  if (file.mimetype !== 'application/pdf') {
-    throw new Error('Resume must be a PDF');
-  }
+  if (!file.mimetype || !file.mimetype.toLowerCase().includes('pdf')) {
+  throw new Error('Resume must be a PDF');
+}
 
   if (file.size > MAX_RESUME_BYTES) {
     throw new Error('Resume exceeds maximum size');
@@ -118,6 +118,8 @@ const uploadStudentResume = async (file) => {
   if (!isPdfBuffer(file.buffer)) {
     throw new Error('Uploaded file is not a valid PDF');
   }
+  console.log("MIME:", file.mimetype);
+console.log("SIZE:", file.size);
 
   const client = getS3Client();
   const key = `student-resumes/${crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex')}.pdf`;

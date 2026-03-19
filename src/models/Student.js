@@ -91,6 +91,11 @@ const StudentSchema = new mongoose.Schema({
     lowercase: true,
     unique: true
   },
+  isDGShipping: {
+  type: String,
+  enum: ['yes', 'no'],
+  default: 'no'
+},
   profileLink: {
     type: String,
     maxlength: 500,

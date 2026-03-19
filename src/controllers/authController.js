@@ -179,6 +179,7 @@ exports.login = async (req, res) => {
       id: student._id.toString(),
       fullName: student.fullName,
       email: student.email,
+      isDGShipping: student.isDGShipping,
       profileLink: student.profileLink,
       isHired: student.isHired,
       currentSubscriptionId: student.currentSubscriptionId,
@@ -241,6 +242,7 @@ exports.getMe = async (req, res) => {
          id: student._id.toString(),
          fullName: student.fullName,
          email: student.email,
+         isDGShipping: student.isDGShipping,
          profileLink: student.profileLink,
          isHired: student.isHired,
          currentSubscriptionId: student.currentSubscriptionId,
@@ -322,7 +324,7 @@ exports.registerStudent = async (req, res) => {
   try {
     const parsed = studentRegistrationSchema.parse(req.body);
 
-    const { fullName, username, email, password, profileLink } = parsed;
+    const { fullName, username, email, password, profileLink, isDGShipping } = parsed;
 
     const existingUser = await User.findOne({ username });
 
@@ -357,6 +359,7 @@ exports.registerStudent = async (req, res) => {
   studentId,
   fullName,
   email,
+  isDGShipping: isDGShipping || 'no',
   profileLink: profileLink || null,
   isHired: false,
   subscriptionTier: 'free'

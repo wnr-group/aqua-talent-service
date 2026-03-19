@@ -1081,6 +1081,7 @@ exports.getStudentProfile = async (req, res) => {
       id: student._id,
       fullName: student.fullName,
       email: student.email,
+      isDGShipping: student.isDGShipping || 'no',
       profileLink: student.profileLink || null,
       bio: student.bio || null,
       location: student.location || null,
