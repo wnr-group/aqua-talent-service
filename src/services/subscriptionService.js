@@ -94,7 +94,20 @@ const getApplicationLimit = async (studentId) => {
     }
 
     if (typeof subscription?.serviceId?.maxApplications === 'number') {
-      return subscription.serviceId.maxApplications;
+      // Include stacked applications from previous plan
+      const baseLimit = subscription.serviceId.maxApplications;
+      const stackedApps = subscription.stackedApplications || 0;
+
+      // Include additional job credits from addons
+      const { getAdditionalJobCredits } = require('./zonePricingService');
+      const addonCredits = await getAdditionalJobCredits(subscription._id);
+
+      return baseLimit + stackedApps + addonCredits;
+    }
+
+    // maxApplications is null means unlimited
+    if (subscription?.serviceId?.maxApplications === null) {
+      return Infinity;
     }
   }
 

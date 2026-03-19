@@ -29,40 +29,14 @@ const {
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-const getIncomingNonIndianPrice = (payload = {}) => {
-  const candidateKeys = [
-    'nonIndianPrice',
-    'internationalPrice',
-    'usdPrice',
-    'non_indian_price',
-    'international_price'
-  ];
-
-  for (const key of candidateKeys) {
-    if (payload[key] !== undefined) {
-      return payload[key];
-    }
-  }
-
-  return undefined;
-};
-
-const getPlanNonIndianPrice = (plan) => (
-  plan.nonIndianPrice
-  ?? plan.internationalPrice
-  ?? plan.usdPrice
-  ?? plan.non_indian_price
-  ?? plan.international_price
-  ?? null
-);
-
 const buildSubscriptionPlanResponse = (plan) => ({
   id: plan._id,
   name: plan.name,
   description: plan.description,
   maxApplications: plan.maxApplications,
   price: plan.price,
-  nonIndianPrice: getPlanNonIndianPrice(plan),
+  priceINR: plan.priceINR,
+  priceUSD: plan.priceUSD,
   currency: plan.currency,
   billingCycle: 'one-time',
   discount: plan.discount,
@@ -74,6 +48,7 @@ const buildSubscriptionPlanResponse = (plan) => ({
   prioritySupport: plan.prioritySupport,
   profileBoost: plan.profileBoost,
   applicationHighlight: plan.applicationHighlight,
+  allZonesIncluded: plan.allZonesIncluded,
   isActive: plan.isActive,
   createdAt: plan.createdAt,
   updatedAt: plan.updatedAt
@@ -1339,6 +1314,8 @@ exports.createSubscriptionPlan = async (req, res) => {
       description,
       maxApplications,
       price,
+      priceINR,
+      priceUSD,
       currency,
       discount,
       features,
@@ -1349,9 +1326,9 @@ exports.createSubscriptionPlan = async (req, res) => {
       prioritySupport,
       profileBoost,
       applicationHighlight,
+      allZonesIncluded,
       isActive
     } = req.body;
-    const nonIndianPrice = getIncomingNonIndianPrice(req.body);
 
     if (!name || name.trim().length < 2) {
       return res.status(400).json({ error: 'Name must be at least 2 characters' });
@@ -1361,12 +1338,14 @@ exports.createSubscriptionPlan = async (req, res) => {
       return res.status(400).json({ error: 'Description must be at least 10 characters' });
     }
 
-    if (price === undefined || price < 0) {
-      return res.status(400).json({ error: 'Price must be a non-negative number' });
+    // Use priceINR as the primary price, fallback to price
+    const inrPrice = priceINR ?? price;
+    if (inrPrice === undefined || inrPrice < 0) {
+      return res.status(400).json({ error: 'Price (INR) must be a non-negative number' });
     }
 
-    if (nonIndianPrice !== undefined && nonIndianPrice !== null && nonIndianPrice < 0) {
-      return res.status(400).json({ error: 'Non-Indian price must be a non-negative number' });
+    if (priceUSD !== undefined && priceUSD !== null && priceUSD < 0) {
+      return res.status(400).json({ error: 'Price (USD) must be a non-negative number' });
     }
 
     if (currency && !CURRENCIES.includes(currency)) {
@@ -1384,10 +1363,10 @@ exports.createSubscriptionPlan = async (req, res) => {
       name: name.trim(),
       description: description.trim(),
       maxApplications: normalizedMaxApplications,
-      price,
-      nonIndianPrice: nonIndianPrice ?? null,
-      internationalPrice: nonIndianPrice ?? null,
-      currency: currency || 'USD',
+      price: inrPrice,
+      priceINR: inrPrice,
+      priceUSD: priceUSD ?? 0,
+      currency: currency || 'INR',
       billingCycle: 'one-time',
       discount: discount || 0,
       features: features || [],
@@ -1398,6 +1377,7 @@ exports.createSubscriptionPlan = async (req, res) => {
       prioritySupport: prioritySupport || false,
       profileBoost: profileBoost || false,
       applicationHighlight: applicationHighlight || false,
+      allZonesIncluded: allZonesIncluded || false,
       isActive: isActive !== false
     });
 
@@ -1427,6 +1407,8 @@ exports.updateSubscriptionPlan = async (req, res) => {
       description,
       maxApplications,
       price,
+      priceINR,
+      priceUSD,
       currency,
       discount,
       features,
@@ -1437,9 +1419,9 @@ exports.updateSubscriptionPlan = async (req, res) => {
       prioritySupport,
       profileBoost,
       applicationHighlight,
+      allZonesIncluded,
       isActive
     } = req.body;
-    const nonIndianPrice = getIncomingNonIndianPrice(req.body);
 
     if (name !== undefined) {
       if (name.trim().length < 2) {
@@ -1455,20 +1437,21 @@ exports.updateSubscriptionPlan = async (req, res) => {
       plan.description = description.trim();
     }
 
-    if (price !== undefined) {
-      if (price < 0) {
-        return res.status(400).json({ error: 'Price must be a non-negative number' });
+    // Handle price updates - support both price and priceINR
+    if (price !== undefined || priceINR !== undefined) {
+      const newPrice = priceINR ?? price;
+      if (newPrice < 0) {
+        return res.status(400).json({ error: 'Price (INR) must be a non-negative number' });
       }
-      plan.price = price;
+      plan.price = newPrice;
+      plan.priceINR = newPrice;
     }
 
-    if (nonIndianPrice !== undefined) {
-      if (nonIndianPrice !== null && nonIndianPrice < 0) {
-        return res.status(400).json({ error: 'Non-Indian price must be a non-negative number' });
+    if (priceUSD !== undefined) {
+      if (priceUSD !== null && priceUSD < 0) {
+        return res.status(400).json({ error: 'Price (USD) must be a non-negative number' });
       }
-
-      plan.nonIndianPrice = nonIndianPrice;
-      plan.internationalPrice = nonIndianPrice;
+      plan.priceUSD = priceUSD;
     }
 
     if (currency !== undefined) {
@@ -1500,6 +1483,7 @@ exports.updateSubscriptionPlan = async (req, res) => {
     if (prioritySupport !== undefined) plan.prioritySupport = prioritySupport;
     if (profileBoost !== undefined) plan.profileBoost = profileBoost;
     if (applicationHighlight !== undefined) plan.applicationHighlight = applicationHighlight;
+    if (allZonesIncluded !== undefined) plan.allZonesIncluded = allZonesIncluded;
     if (isActive !== undefined) plan.isActive = isActive;
 
     await plan.save();

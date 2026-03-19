@@ -26,26 +26,12 @@ const normalizeCurrency = (value, fallback = 'INR') => {
 
 const buildReceipt = (serviceId) => `svc_${String(serviceId).slice(-8)}_${Date.now().toString(36)}`;
 
-const getUsdFallbackPrice = (service) => {
-  const fallbackValues = [
-    service.priceUSD,
-    service.usdPrice,
-    service.nonIndianPrice,
-    service.internationalPrice,
-    service.non_indian_price,
-    service.international_price,
-    service.price
-  ];
-
-  return fallbackValues.find((value) => typeof value === 'number' && value >= 0) ?? null;
-};
-
 const getServicePrice = (service, currency) => {
   if (currency === 'INR') {
     return typeof service.priceINR === 'number' ? service.priceINR : service.price;
   }
 
-  return getUsdFallbackPrice(service);
+  return typeof service.priceUSD === 'number' ? service.priceUSD : null;
 };
 
 const toSmallestUnit = (amount) => Math.round(Number(amount) * 100);
@@ -676,6 +662,7 @@ exports.purchaseZoneAddon = async (req, res) => {
       orderId: order.id,
       amount: order.amount,
       currency: order.currency,
+      key: process.env.RAZORPAY_KEY_ID,
       addon: { id: addon._id, name: addon.name }
     });
   } catch (error) {
@@ -720,9 +707,11 @@ exports.verifyZoneAddonPayment = async (req, res) => {
       currency: order.currency,
       paymentDate: new Date(),
       status: 'completed',
+      razorpayOrderId: razorpay_order_id,
+      razorpayPaymentId: razorpay_payment_id,
       transactionId: razorpay_payment_id,
       paymentMethod: 'razorpay',
-      gatewayResponse: { orderId: razorpay_order_id }
+      gatewayResponse: { orderId: razorpay_order_id, type: 'zone_addon' }
     });
 
     const SubscriptionAddon = require('../models/SubscriptionAddon');
@@ -762,8 +751,12 @@ exports.verifyZoneAddonPayment = async (req, res) => {
 
 exports.initiatePayPerJob = async (req, res) => {
   try {
-    const { jobId } = req.params;
+    const jobId = req.params.jobId || req.body.jobId;
     const { currency = 'INR' } = req.body;
+
+    if (!jobId) {
+      return res.status(400).json({ error: 'jobId is required' });
+    }
 
     const student = await Student.findOne({ userId: req.user.userId });
     if (!student) {
@@ -786,7 +779,10 @@ exports.initiatePayPerJob = async (req, res) => {
       return res.status(400).json({ error: 'You have already purchased access to this job' });
     }
 
-    const amount = currency === 'INR' ? 2500 : 35;
+    // Get pay-per-job pricing from database
+    const Addon = require('../models/Addon');
+    const payPerJobPricing = await Addon.getPayPerJobPricing();
+    const amount = currency === 'INR' ? payPerJobPricing.priceINR : payPerJobPricing.priceUSD;
 
     let purchase = await PayPerJobPurchase.findOne({
       studentId: student._id,
@@ -826,6 +822,7 @@ exports.initiatePayPerJob = async (req, res) => {
       orderId: order.id,
       amount: order.amount,
       currency: order.currency,
+      key: process.env.RAZORPAY_KEY_ID,
       purchaseId: purchase._id,
       job: { id: job._id, title: job.title }
     });
@@ -837,8 +834,14 @@ exports.initiatePayPerJob = async (req, res) => {
 
 exports.verifyPayPerJob = async (req, res) => {
   try {
-    const { jobId } = req.params;
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+    // Support both field naming conventions from frontend
+    const razorpay_order_id = req.body.razorpay_order_id || req.body.orderId;
+    const razorpay_payment_id = req.body.razorpay_payment_id || req.body.paymentId;
+    const razorpay_signature = req.body.razorpay_signature || req.body.signature;
+
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).json({ error: 'Missing payment verification fields' });
+    }
 
     const generated_signature = crypto
       .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
@@ -854,10 +857,10 @@ exports.verifyPayPerJob = async (req, res) => {
       return res.status(404).json({ error: 'Student not found' });
     }
 
+    // Find purchase by order ID (jobId is optional since order ID is unique)
     const PayPerJobPurchase = require('../models/PayPerJobPurchase');
     const purchase = await PayPerJobPurchase.findOne({
       studentId: student._id,
-      jobPostingId: jobId,
       razorpayOrderId: razorpay_order_id
     });
 

@@ -9,15 +9,7 @@ const JobPosting = require('../models/JobPosting');
 const PayPerJobPurchase = require('../models/PayPerJobPurchase');
 const Zone = require('../models/Zone');
 
-const isZoneEnforcementEnabled = () => {
-  return process.env.ZONE_ENFORCEMENT_ENABLED === 'true';
-};
-
 const getAccessibleZones = async (studentId) => {
-  if (!isZoneEnforcementEnabled()) {
-    return { allZones: true, zoneIds: [] };
-  }
-
   const student = await Student.findById(studentId);
   if (!student) {
     return { allZones: false, zoneIds: [] };
@@ -57,10 +49,6 @@ const getAccessibleZones = async (studentId) => {
 };
 
 const canAccessJob = async (studentId, jobPostingId) => {
-  if (!isZoneEnforcementEnabled()) {
-    return { canAccess: true, source: 'zone-enforcement-disabled' };
-  }
-
   // Check Pay Per Job purchase first
   const payPerJob = await PayPerJobPurchase.findOne({
     studentId,
@@ -100,10 +88,14 @@ const canAccessJob = async (studentId, jobPostingId) => {
   };
 };
 
-const getUnlockOptions = async (zoneId) => {
+const getUnlockOptions = async (zoneId, studentId = null) => {
   const addons = await Addon.find({
     type: 'zone'
   }).select('name priceINR priceUSD zoneCount unlockAllZones').lean();
+
+  // Get zone name for description
+  const zone = zoneId ? await Zone.findById(zoneId).select('name').lean() : null;
+  const zoneName = zone?.name || 'this zone';
 
   const options = [];
 
@@ -113,9 +105,28 @@ const getUnlockOptions = async (zoneId) => {
     options.push({
       type: 'zone-addon',
       addonId: singleZone._id,
-      name: singleZone.name,
+      label: singleZone.name,
+      description: `Unlock ${zoneName} permanently`,
       priceINR: singleZone.priceINR,
-      priceUSD: singleZone.priceUSD
+      priceUSD: singleZone.priceUSD,
+      zonesIncluded: singleZone.zoneCount
+    });
+  }
+
+  // Multi-zone bundle addons (2+ zones, not unlock all)
+  const bundles = addons
+    .filter(a => a.zoneCount > 1 && !a.unlockAllZones)
+    .sort((a, b) => a.zoneCount - b.zoneCount);
+
+  for (const bundle of bundles) {
+    options.push({
+      type: 'zone-addon',
+      addonId: bundle._id,
+      label: bundle.name,
+      description: `Unlock any ${bundle.zoneCount} zones`,
+      priceINR: bundle.priceINR,
+      priceUSD: bundle.priceUSD,
+      zonesIncluded: bundle.zoneCount
     });
   }
 
@@ -123,32 +134,98 @@ const getUnlockOptions = async (zoneId) => {
   const unlockAll = addons.find(a => a.unlockAllZones);
   if (unlockAll) {
     options.push({
-      type: 'unlock-all-zones',
+      type: 'zone-addon',
       addonId: unlockAll._id,
-      name: unlockAll.name,
+      label: unlockAll.name,
+      description: 'Unlock all zones permanently',
       priceINR: unlockAll.priceINR,
-      priceUSD: unlockAll.priceUSD
+      priceUSD: unlockAll.priceUSD,
+      unlockAllZones: true
     });
   }
 
-  // Pay per job option (hardcoded pricing as per spec)
+  // Pay per job option (pricing from database)
+  const payPerJobPricing = await Addon.getPayPerJobPricing();
   options.push({
     type: 'pay-per-job',
-    priceINR: 2500,
-    priceUSD: 35
+    label: 'One-time Job Access',
+    description: 'Apply to this job only',
+    priceINR: payPerJobPricing.priceINR,
+    priceUSD: payPerJobPricing.priceUSD
   });
 
-  // Upgrade plan option
-  options.push({
-    type: 'upgrade-plan',
-    url: '/pricing'
+  // Upgrade plan option - find a plan with more zones than current plan
+  const AvailableService = require('../models/AvailableService');
+  const PlanZone = require('../models/PlanZone');
+
+  let currentPlanZoneCount = 0;
+  let currentPlanId = null;
+
+  // Get current plan's zone count if studentId provided
+  if (studentId) {
+    const student = await Student.findById(studentId);
+    if (student?.currentSubscriptionId) {
+      const subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
+        .select('serviceId');
+      if (subscription?.serviceId) {
+        currentPlanId = subscription.serviceId;
+        currentPlanZoneCount = await PlanZone.countDocuments({ planId: currentPlanId });
+      }
+    }
+  }
+
+  // Find plans with more zones than current, or allZonesIncluded
+  const allPlans = await AvailableService.find({
+    isActive: true,
+    tier: 'paid'
+  }).select('_id name allZonesIncluded').lean();
+
+  // Get zone counts for each plan
+  const planZoneCounts = await PlanZone.aggregate([
+    { $group: { _id: '$planId', zoneCount: { $sum: 1 } } }
+  ]);
+  const zoneCountMap = new Map(planZoneCounts.map(p => [p._id.toString(), p.zoneCount]));
+
+  // Find upgrade options: plans with more zones OR allZonesIncluded
+  const upgradePlans = allPlans.filter(plan => {
+    // Skip current plan
+    if (currentPlanId && plan._id.toString() === currentPlanId.toString()) {
+      return false;
+    }
+    // Include if allZonesIncluded
+    if (plan.allZonesIncluded) {
+      return true;
+    }
+    // Include if has more zones than current plan
+    const planZones = zoneCountMap.get(plan._id.toString()) || 0;
+    return planZones > currentPlanZoneCount;
   });
+
+  // Pick the cheapest upgrade option
+  if (upgradePlans.length > 0) {
+    // Sort by zone count to get the next tier up
+    const sortedUpgrades = upgradePlans.sort((a, b) => {
+      const aZones = a.allZonesIncluded ? 999 : (zoneCountMap.get(a._id.toString()) || 0);
+      const bZones = b.allZonesIncluded ? 999 : (zoneCountMap.get(b._id.toString()) || 0);
+      return aZones - bZones;
+    });
+
+    const upgradePlan = sortedUpgrades[0];
+    options.push({
+      type: 'upgrade-plan',
+      label: `Upgrade to ${upgradePlan.name}`,
+      description: upgradePlan.allZonesIncluded
+        ? 'Get access to all zones + more applications'
+        : 'Get access to more zones + applications',
+      planId: upgradePlan._id,
+      url: '/pricing'
+    });
+  }
 
   return options;
 };
 
 module.exports = {
-  isZoneEnforcementEnabled,
   getAccessibleZones,
   canAccessJob,
   getUnlockOptions

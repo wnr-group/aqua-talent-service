@@ -13,7 +13,7 @@ const { getSubscriptionUsage, incrementApplicationCount, decrementApplicationCou
 const { uploadStudentResume } = require('../services/mediaService');
 const emailService = require('../services/emailService');
 const notificationService = require('../services/notificationService');
-const { canAccessJob, getUnlockOptions, isZoneEnforcementEnabled } = require('../services/zoneAccessService');
+const { canAccessJob, getUnlockOptions } = require('../services/zoneAccessService');
 
 // Check if email is taken by another user (excluding current student)
 const isEmailTakenByOther = async (email, currentStudentId) => {
@@ -334,7 +334,7 @@ exports.getJobs = async (req, res) => {
     const [jobs, total] = await Promise.all([
       JobPosting.find(query)
         .populate('companyId', 'name logo industry size website')
-        .populate('countryId', 'zoneId')
+        .populate('countryId', 'zoneId countryName')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNum)
@@ -354,6 +354,9 @@ exports.getJobs = async (req, res) => {
         salaryRange: jobObj.salaryRange,
         deadline: jobObj.deadline,
         createdAt: jobObj.createdAt,
+        countryId: jobObj.countryId?._id || null,
+        countryName: jobObj.countryId?.countryName || null,
+        zoneId: jobObj.countryId?.zoneId || null,
         company: jobObj.companyId ? {
           id: jobObj.companyId._id,
           name: jobObj.companyId.name,
@@ -368,7 +371,7 @@ exports.getJobs = async (req, res) => {
     // After transformedJobs is created, add zone lock status
     let jobsWithZoneStatus = transformedJobs;
 
-    if (req.user && req.user.userType === 'student' && isZoneEnforcementEnabled()) {
+    if (req.user && req.user.userType === 'student') {
       try {
         const student = await Student.findOne({ userId: req.user.userId });
         if (student) {
@@ -384,31 +387,62 @@ exports.getJobs = async (req, res) => {
           }).distinct('jobPostingId');
           const paidJobIdSet = new Set(paidJobIds.map(id => id.toString()));
 
+          // Batch fetch: get all job IDs this student has applied to
+          const appliedJobIds = await Application.find({
+            studentId: student._id
+          }).distinct('jobPostingId');
+          const appliedJobIdSet = new Set(appliedJobIds.map(id => id.toString()));
+
+          // Batch fetch: all zones for zoneLockReason
+          const allZones = await Zone.find().select('name').lean();
+          const zoneMap = new Map(allZones.map(z => [z._id.toString(), z.name]));
+
           // Check each job against cached data (no additional queries)
           jobsWithZoneStatus = transformedJobs.map(job => {
-            // If pay-per-job purchased, not locked
-            if (paidJobIdSet.has(job.id.toString())) {
-              return { ...job, isZoneLocked: false };
+            const jobIdStr = job.id.toString();
+            const hasApplied = appliedJobIdSet.has(jobIdStr);
+
+            // If already applied, not locked (they already have access)
+            if (hasApplied) {
+              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'applied', hasApplied: true };
             }
 
-            // If job has no countryId, not locked (handled by job.countryId being undefined)
-            // Note: transformedJobs doesn't include countryId, so we need to check original jobs
-            const originalJob = jobs.find(j => j._id.toString() === job.id.toString());
-            if (!originalJob?.countryId) {
-              return { ...job, isZoneLocked: false };
+            // If pay-per-job purchased, not locked
+            if (paidJobIdSet.has(jobIdStr)) {
+              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'pay-per-job', hasApplied: false };
+            }
+
+            // If job has no countryId/zoneId, not locked
+            if (!job.zoneId) {
+              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'no-zone-restriction', hasApplied: false };
             }
 
             // If student has all zones access, not locked
             if (accessibleZones.allZones) {
-              return { ...job, isZoneLocked: false };
+              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'all-zones', hasApplied: false };
             }
 
             // Check if job's zone is in student's accessible zones
-            const jobZoneId = originalJob.countryId.zoneId?.toString();
+            const jobZoneId = job.zoneId?.toString();
             const hasAccess = jobZoneId && accessibleZones.zoneIds.some(
               zId => zId.toString() === jobZoneId
             );
-            return { ...job, isZoneLocked: !hasAccess };
+
+            if (hasAccess) {
+              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'subscription', hasApplied: false };
+            }
+
+            // Locked - include zone info
+            return {
+              ...job,
+              isZoneLocked: true,
+              zoneLockReason: {
+                zoneId: jobZoneId,
+                zoneName: zoneMap.get(jobZoneId) || 'Unknown Zone'
+              },
+              accessSource: null,
+              hasApplied: false
+            };
           });
         }
       } catch (zoneError) {
@@ -473,26 +507,36 @@ exports.getJob = async (req, res) => {
     }
 
     // Zone access check (after quota check)
+    // Skip zone check if already applied - they already have access to this job
     let isZoneLocked = false;
     let zoneLockReason = null;
+    let accessSource = null; // 'subscription' | 'pay-per-job' | 'all-zones' | 'applied' | null
 
-    if (student && !isDescriptionLocked && isZoneEnforcementEnabled()) {
-      try {
-        const zoneAccess = await canAccessJob(student._id, jobId);
-        if (!zoneAccess.canAccess) {
-          isZoneLocked = true;
-          const unlockOptions = await getUnlockOptions(zoneAccess.requiredZoneId);
-          zoneLockReason = {
-            zone: {
-              id: zoneAccess.requiredZoneId,
-              name: zoneAccess.zoneName
-            },
-            unlockOptions
-          };
+    if (student && !isDescriptionLocked) {
+      if (hasApplied) {
+        // Already applied - they have access
+        accessSource = 'applied';
+      } else {
+        try {
+          const zoneAccess = await canAccessJob(student._id, jobId);
+          if (zoneAccess.canAccess) {
+            // Map the source from zoneAccessService to frontend-friendly values
+            accessSource = zoneAccess.source; // 'pay-per-job', 'subscription', 'all-zones', 'no-zone-restriction'
+          } else {
+            isZoneLocked = true;
+            const unlockOptions = await getUnlockOptions(zoneAccess.requiredZoneId, student._id);
+            zoneLockReason = {
+              zone: {
+                id: zoneAccess.requiredZoneId,
+                name: zoneAccess.zoneName
+              },
+              unlockOptions
+            };
+          }
+        } catch (zoneError) {
+          console.error('Zone access check failed:', zoneError);
+          // Graceful degradation: if zone check fails, allow access
         }
-      } catch (zoneError) {
-        console.error('Zone access check failed:', zoneError);
-        // Graceful degradation: if zone check fails, allow access
       }
     }
 
@@ -507,6 +551,7 @@ exports.getJob = async (req, res) => {
 
     const job = await JobPosting.findOne(query)
       .populate('companyId', 'name logo description industry size website socialLinks foundedYear')
+      .populate('countryId', 'zoneId countryName')
       .select('-rejectionReason -approvedAt');
 
     if (!job) {
@@ -514,6 +559,13 @@ exports.getJob = async (req, res) => {
     }
 
     const jobObj = job.toObject();
+
+    // Get zone name if available
+    let zoneName = null;
+    if (jobObj.countryId?.zoneId) {
+      const zone = await Zone.findById(jobObj.countryId.zoneId).select('name').lean();
+      zoneName = zone?.name || null;
+    }
 
     res.json({
       id: jobObj._id,
@@ -526,6 +578,10 @@ exports.getJob = async (req, res) => {
       deadline: jobObj.deadline,
       status: jobObj.status,
       createdAt: jobObj.createdAt,
+      countryId: jobObj.countryId?._id || null,
+      countryName: jobObj.countryId?.countryName || null,
+      zoneId: jobObj.countryId?.zoneId || null,
+      zoneName,
       company: jobObj.companyId ? {
         id: jobObj.companyId._id,
         name: jobObj.companyId.name,
@@ -543,6 +599,7 @@ exports.getJob = async (req, res) => {
       isDescriptionLocked: isLocked,
       isZoneLocked,
       zoneLockReason,
+      accessSource,
       hasApplied,
       applicationStatus
     });
@@ -588,27 +645,25 @@ exports.applyToJob = async (req, res) => {
     }
 
     // Zone access check
-    if (isZoneEnforcementEnabled()) {
-      try {
-        const zoneAccess = await canAccessJob(student._id, jobId);
-        if (!zoneAccess.canAccess) {
-          const unlockOptions = await getUnlockOptions(zoneAccess.requiredZoneId);
-          return res.status(403).json({
-            error: 'This job is in a zone not included in your plan.',
-            isZoneLocked: true,
-            zoneLockReason: {
-              zone: {
-                id: zoneAccess.requiredZoneId,
-                name: zoneAccess.zoneName
-              },
-              unlockOptions
-            }
-          });
-        }
-      } catch (zoneError) {
-        console.error('Zone access check failed in applyToJob:', zoneError);
-        // If zone check fails, allow the application to proceed (graceful degradation)
+    try {
+      const zoneAccess = await canAccessJob(student._id, jobId);
+      if (!zoneAccess.canAccess) {
+        const unlockOptions = await getUnlockOptions(zoneAccess.requiredZoneId, student._id);
+        return res.status(403).json({
+          error: 'This job is in a zone not included in your plan.',
+          isZoneLocked: true,
+          zoneLockReason: {
+            zone: {
+              id: zoneAccess.requiredZoneId,
+              name: zoneAccess.zoneName
+            },
+            unlockOptions
+          }
+        });
       }
+    } catch (zoneError) {
+      console.error('Zone access check failed in applyToJob:', zoneError);
+      // If zone check fails, allow the application to proceed (graceful degradation)
     }
 
     const existingApp = await Application.findOne({
@@ -1086,23 +1141,31 @@ exports.getSubscriptionZones = async (req, res) => {
     const { getAccessibleZones } = require('../services/zoneAccessService');
     const access = await getAccessibleZones(student._id);
 
+    const allZones = await Zone.find().select('name description').lean();
+    const formatZone = z => ({ id: z._id, name: z.name, description: z.description });
+
     if (access.allZones) {
-      const Zone = require('../models/Zone');
-      const allZones = await Zone.find().select('name description').lean();
       return res.json({
         allZonesIncluded: true,
-        zones: allZones.map(z => ({ id: z._id, name: z.name, description: z.description }))
+        accessibleZones: allZones.map(formatZone),
+        lockedZones: []
       });
     }
 
-    const Zone = require('../models/Zone');
-    const zones = await Zone.find({ _id: { $in: access.zoneIds } })
-      .select('name description')
-      .lean();
+    const accessibleZoneIdSet = new Set(access.zoneIds.map(id => id.toString()));
+
+    const accessibleZones = allZones
+      .filter(z => accessibleZoneIdSet.has(z._id.toString()))
+      .map(formatZone);
+
+    const lockedZones = allZones
+      .filter(z => !accessibleZoneIdSet.has(z._id.toString()))
+      .map(formatZone);
 
     res.json({
       allZonesIncluded: false,
-      zones: zones.map(z => ({ id: z._id, name: z.name, description: z.description }))
+      accessibleZones,
+      lockedZones
     });
   } catch (error) {
     console.error('Get subscription zones error:', error);

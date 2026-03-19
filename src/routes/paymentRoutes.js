@@ -30,6 +30,13 @@ router.post('/webhooks/razorpay', paymentController.handleWebhook);
 router.get('/geo-location', paymentController.getGeoLocation);
 
 router.post(
+  '/zone-addon/create-order',
+  requireAuth,
+  requireUserType('student'),
+  paymentController.purchaseZoneAddon
+);
+
+router.post(
   '/zone-addon/purchase',
   requireAuth,
   requireUserType('student'),
@@ -43,6 +50,22 @@ router.post(
   paymentController.verifyZoneAddonPayment
 );
 
+// Pay-per-job routes - create-order must come before :jobId to avoid matching "create-order" as jobId
+router.post(
+  '/pay-per-job/create-order',
+  requireAuth,
+  requireUserType('student'),
+  paymentController.initiatePayPerJob
+);
+
+router.post(
+  '/pay-per-job/verify',
+  requireAuth,
+  requireUserType('student'),
+  paymentController.verifyPayPerJob
+);
+
+// Legacy routes with jobId in path (still supported)
 router.post(
   '/pay-per-job/:jobId',
   requireAuth,

@@ -11,7 +11,7 @@ const AddonSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['zone', 'jobs'],
+    enum: ['zone', 'jobs', 'pay-per-job'],
     required: true
   },
   priceINR: {
@@ -69,7 +69,27 @@ AddonSchema.pre('validate', function() {
       this.invalidate('jobCreditCount', 'Zone addon cannot define jobCreditCount');
     }
   }
+
+  // pay-per-job type only needs pricing, no other fields
+  if (this.type === 'pay-per-job') {
+    if (isPresent(this.zoneCount)) {
+      this.invalidate('zoneCount', 'Pay-per-job addon cannot define zoneCount');
+    }
+    if (isPresent(this.jobCreditCount)) {
+      this.invalidate('jobCreditCount', 'Pay-per-job addon cannot define jobCreditCount');
+    }
+  }
 });
+
+// Static method to get pay-per-job pricing
+AddonSchema.statics.getPayPerJobPricing = async function() {
+  const addon = await this.findOne({ type: 'pay-per-job' }).lean();
+  if (addon) {
+    return { priceINR: addon.priceINR, priceUSD: addon.priceUSD };
+  }
+  // Fallback defaults if not configured
+  return { priceINR: 2500, priceUSD: 35 };
+};
 
 AddonSchema.index({ name: 1 }, { unique: true });
 AddonSchema.index({ type: 1 });

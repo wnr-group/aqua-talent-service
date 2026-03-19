@@ -53,10 +53,54 @@ const findDefaultProPlan = async (planKey = 'pro') => {
 exports.getAvailableServices = async (req, res) => {
   try {
     const services = await AvailableService.find({ isActive: true })
-      .select('name tier description maxApplications price currency billingCycle trialDays discount features badge displayOrder prioritySupport profileBoost applicationHighlight')
-      .sort({ displayOrder: 1, price: 1 });
+      .select('name tier description maxApplications price priceINR priceUSD currency billingCycle trialDays discount features badge displayOrder prioritySupport profileBoost applicationHighlight allZonesIncluded')
+      .sort({ displayOrder: 1, price: 1 })
+      .lean();
 
-    res.json({ services });
+    // Fetch zones for each plan
+    const PlanZone = require('../models/PlanZone');
+    const Zone = require('../models/Zone');
+
+    const serviceIds = services.map(s => s._id);
+    const planZones = await PlanZone.find({ planId: { $in: serviceIds } })
+      .populate('zoneId', 'name description')
+      .lean();
+
+    // Group zones by planId
+    const zonesByPlan = {};
+    for (const pz of planZones) {
+      if (!pz.zoneId) continue;
+      const planIdStr = pz.planId.toString();
+      if (!zonesByPlan[planIdStr]) {
+        zonesByPlan[planIdStr] = [];
+      }
+      zonesByPlan[planIdStr].push({
+        id: pz.zoneId._id,
+        name: pz.zoneId.name,
+        description: pz.zoneId.description
+      });
+    }
+
+    // For plans with allZonesIncluded, fetch all zones
+    const allZones = await Zone.find().select('name description').lean();
+    const allZonesFormatted = allZones.map(z => ({
+      id: z._id,
+      name: z.name,
+      description: z.description
+    }));
+
+    // Attach zones to each service
+    const servicesWithZones = services.map(service => {
+      const serviceIdStr = service._id.toString();
+      return {
+        ...service,
+        zones: service.allZonesIncluded
+          ? allZonesFormatted
+          : (zonesByPlan[serviceIdStr] || [])
+      };
+    });
+
+    res.json({ services: servicesWithZones });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
@@ -143,16 +187,66 @@ const createOrUpgradeSubscriptionForStudent = async ({
   }
 
   const now = new Date();
+  let remainingApplications = 0;
+  let addonZonesToPreserve = [];
+  let currentSubscription = null;
 
-  // Mark previous subscription as exhausted if exists
+  // Check current subscription if exists
   if (student.currentSubscriptionId) {
-    await ActiveSubscription.updateOne(
-      { _id: student.currentSubscriptionId, studentId: student._id, status: { $in: ['active', 'pending'] } },
-      { $set: { status: 'exhausted', autoRenew: false } }
-    );
+    currentSubscription = await ActiveSubscription.findOne({
+      _id: student.currentSubscriptionId,
+      studentId: student._id,
+      status: { $in: ['active', 'pending'] }
+    }).populate('serviceId', 'maxApplications');
+
+    if (currentSubscription) {
+      // Block same plan purchase
+      if (currentSubscription.serviceId._id.toString() === service._id.toString()) {
+        const currentMax = currentSubscription.serviceId.maxApplications;
+        const used = currentSubscription.applicationsUsed || 0;
+        const remaining = currentMax === null ? Infinity : currentMax - used;
+
+        if (remaining > 0 || currentMax === null) {
+          const error = new Error('You already have an active subscription to this plan with remaining applications. Please use your current quota or upgrade to a different plan.');
+          error.statusCode = 400;
+          error.code = 'SAME_PLAN_ACTIVE';
+          throw error;
+        }
+      }
+
+      // Calculate remaining applications to stack
+      const currentMax = currentSubscription.serviceId.maxApplications;
+      const used = currentSubscription.applicationsUsed || 0;
+
+      if (currentMax !== null) {
+        remainingApplications = Math.max(0, currentMax - used);
+      }
+      // If currentMax is null (unlimited), we don't carry over anything special
+
+      // Get addon-purchased zones to preserve
+      const SubscriptionZone = require('../models/SubscriptionZone');
+      const addonZones = await SubscriptionZone.find({
+        subscriptionId: currentSubscription._id,
+        source: 'addon'
+      }).lean();
+
+      addonZonesToPreserve = addonZones.map(z => z.zoneId);
+
+      // Mark previous subscription as exhausted
+      await ActiveSubscription.updateOne(
+        { _id: currentSubscription._id },
+        { $set: { status: 'exhausted', autoRenew: false } }
+      );
+    }
   }
 
-  // Create new subscription with fresh application quota (applicationsUsed = 0)
+  // Calculate new maxApplications with stacking
+  let newMaxApplications = service.maxApplications;
+  if (newMaxApplications !== null && remainingApplications > 0) {
+    newMaxApplications = service.maxApplications + remainingApplications;
+  }
+
+  // Create new subscription with stacked quota
   const subscription = await ActiveSubscription.create({
     studentId: student._id,
     serviceId: service._id,
@@ -160,7 +254,8 @@ const createOrUpgradeSubscriptionForStudent = async ({
     endDate: null, // Quota-based, not time-based
     status: 'active',
     autoRenew: false,
-    applicationsUsed: 0
+    applicationsUsed: 0,
+    stackedApplications: remainingApplications
   });
 
   let paymentRecord = null;
@@ -176,7 +271,11 @@ const createOrUpgradeSubscriptionForStudent = async ({
       status: 'completed',
       transactionId: generateTransactionId(),
       paymentMethod,
-      gatewayResponse
+      gatewayResponse: {
+        ...gatewayResponse,
+        stackedApplications: remainingApplications,
+        previousSubscriptionId: currentSubscription?._id?.toString() || null
+      }
     });
   }
 
@@ -197,12 +296,79 @@ const createOrUpgradeSubscriptionForStudent = async ({
     serviceId: service._id
   });
 
+  // Preserve addon-purchased zones from previous subscription
+  if (addonZonesToPreserve.length > 0) {
+    const SubscriptionZone = require('../models/SubscriptionZone');
+    const zoneOperations = addonZonesToPreserve.map(zoneId => ({
+      updateOne: {
+        filter: {
+          subscriptionId: subscription._id,
+          zoneId
+        },
+        update: {
+          $setOnInsert: {
+            subscriptionId: subscription._id,
+            zoneId,
+            source: 'addon',
+            createdAt: now
+          }
+        },
+        upsert: true
+      }
+    }));
+
+    await SubscriptionZone.bulkWrite(zoneOperations, { ordered: false });
+  }
+
+  // Also preserve addon records from previous subscription
+  if (currentSubscription) {
+    const SubscriptionAddon = require('../models/SubscriptionAddon');
+    const previousAddons = await SubscriptionAddon.find({
+      subscriptionId: currentSubscription._id
+    }).lean();
+
+    if (previousAddons.length > 0) {
+      const Addon = require('../models/Addon');
+      // Only preserve zone addons, not job addons (job credits are already counted in remaining)
+      const zoneAddonIds = await Addon.find({ type: 'zone' }).distinct('_id');
+      const zoneAddonIdStrings = zoneAddonIds.map(id => id.toString());
+
+      const zoneAddonsToPreserve = previousAddons.filter(
+        addon => zoneAddonIdStrings.includes(addon.addonId.toString())
+      );
+
+      if (zoneAddonsToPreserve.length > 0) {
+        const addonOperations = zoneAddonsToPreserve.map(addon => ({
+          updateOne: {
+            filter: {
+              subscriptionId: subscription._id,
+              addonId: addon.addonId
+            },
+            update: {
+              $setOnInsert: {
+                subscriptionId: subscription._id,
+                addonId: addon.addonId,
+                paymentRecordId: addon.paymentRecordId,
+                quantity: addon.quantity,
+                createdAt: now
+              }
+            },
+            upsert: true
+          }
+        }));
+
+        await SubscriptionAddon.bulkWrite(addonOperations, { ordered: false });
+      }
+    }
+  }
+
   const populatedSubscription = await ActiveSubscription.findById(subscription._id)
     .populate('serviceId', 'name description maxApplications price features');
 
   return {
     subscription: populatedSubscription,
-    payment: paymentRecord
+    payment: paymentRecord,
+    stackedApplications: remainingApplications
   };
 };
 
