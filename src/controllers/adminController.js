@@ -1082,7 +1082,7 @@ exports.getStudentProfile = async (req, res) => {
       student.introVideoUrl ? getPresignedUrl(student.introVideoUrl) : null
     ]);
 
-    // Get payment history
+    // Get payment history with detailed type information
     const payments = await PaymentRecord.find({ studentId: student._id })
       .populate({
         path: 'subscriptionId',
@@ -1091,7 +1091,30 @@ exports.getStudentProfile = async (req, res) => {
           select: 'name price'
         }
       })
+      .populate('serviceId', 'name price')
       .sort({ paymentDate: -1 });
+
+    // Get pay-per-job purchases for this student to enrich payment data
+    const PayPerJobPurchase = require('../models/PayPerJobPurchase');
+    const JobPosting = require('../models/JobPosting');
+    const payPerJobPurchases = await PayPerJobPurchase.find({
+      studentId: student._id
+    }).populate('jobPostingId', 'title').lean();
+    // Map by razorpayOrderId for lookup
+    const payPerJobByOrderId = new Map(
+      payPerJobPurchases
+        .filter(p => p.razorpayOrderId)
+        .map(p => [p.razorpayOrderId, p])
+    );
+
+    // Get subscription addons to enrich payment data
+    const SubscriptionAddon = require('../models/SubscriptionAddon');
+    const subscriptionAddons = await SubscriptionAddon.find({
+      paymentRecordId: { $in: payments.map(p => p._id) }
+    }).populate('addonId', 'name type').lean();
+    const addonByPaymentId = new Map(
+      subscriptionAddons.map(sa => [sa.paymentRecordId.toString(), sa])
+    );
 
     // Get all applications with job details
     const applications = await Application.find({ studentId: student._id })
@@ -1138,19 +1161,72 @@ exports.getStudentProfile = async (req, res) => {
           } : null
         } : null
       },
-      payments: payments.map(p => ({
-        id: p._id,
-        amount: p.amount,
-        currency: p.currency,
-        status: p.status,
-        paymentDate: p.paymentDate,
-        paymentMethod: p.paymentMethod,
-        transactionId: p.transactionId,
-        plan: p.subscriptionId?.serviceId ? {
-          name: p.subscriptionId.serviceId.name,
-          price: p.subscriptionId.serviceId.price
-        } : null
-      })),
+      payments: payments.map(p => {
+        // Determine payment type from gatewayResponse or related records
+        let paymentType = 'unknown';
+        let typeLabel = 'Unknown';
+        let details = null;
+
+        const gatewayType = p.gatewayResponse?.type;
+        // Get order ID from either field or gatewayResponse
+        const orderId = p.razorpayOrderId || p.gatewayResponse?.orderId;
+
+        if (gatewayType === 'pay_per_job') {
+          paymentType = 'pay-per-job';
+          typeLabel = 'Pay Per Job';
+          // Look up by order ID from gatewayResponse
+          const purchase = payPerJobByOrderId.get(orderId);
+          if (purchase?.jobPostingId) {
+            details = {
+              jobId: purchase.jobPostingId._id,
+              jobTitle: purchase.jobPostingId.title
+            };
+          }
+        } else if (gatewayType === 'zone_addon') {
+          paymentType = 'zone-addon';
+          typeLabel = 'Zone Addon';
+          const addon = addonByPaymentId.get(p._id.toString());
+          if (addon?.addonId) {
+            details = {
+              addonId: addon.addonId._id,
+              addonName: addon.addonId.name
+            };
+          }
+        } else if (p.subscriptionId?.serviceId) {
+          // Has subscription = plan purchase (completed or pending)
+          paymentType = 'plan';
+          typeLabel = 'Plan Purchase';
+          details = {
+            planId: p.subscriptionId.serviceId._id,
+            planName: p.subscriptionId.serviceId.name,
+            planPrice: p.subscriptionId.serviceId.price
+          };
+        } else if (p.serviceId) {
+          // Has serviceId but no subscription = pending plan purchase
+          paymentType = 'plan';
+          typeLabel = 'Plan Purchase';
+          details = {
+            planId: p.serviceId._id,
+            planName: p.serviceId.name,
+            planPrice: p.serviceId.price
+          };
+        }
+
+        return {
+          id: p._id,
+          type: paymentType,
+          typeLabel,
+          amount: p.amount,
+          currency: p.currency,
+          status: p.status,
+          paymentDate: p.paymentDate,
+          paymentMethod: p.paymentMethod,
+          razorpayOrderId: orderId || null,
+          razorpayPaymentId: p.razorpayPaymentId || null,
+          transactionId: p.razorpayPaymentId || p.transactionId,
+          details
+        };
+      }),
       applications: applications.map(app => ({
         id: app._id,
         status: app.status,
