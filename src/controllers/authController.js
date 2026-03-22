@@ -324,7 +324,7 @@ exports.registerStudent = async (req, res) => {
   try {
     const parsed = studentRegistrationSchema.parse(req.body);
 
-    const { fullName, username, email, password, profileLink, isDGShipping } = parsed;
+    const { fullName, username, email, password, profileLink, isDGShipping, studentId } = parsed;
 
     const existingUser = await User.findOne({ username });
 
@@ -350,8 +350,6 @@ exports.registerStudent = async (req, res) => {
 
     // Get or create the free plan
     const freePlan = await AvailableService.getFreePlan();
-
-    const studentId = `STU-${Date.now()}`;
 
     // Create student first (without subscription)
     const student = await Student.create({
