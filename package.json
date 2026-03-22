@@ -7,7 +7,9 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
-    "seed": "node scripts/seed.js"
+    "seed": "node scripts/seed.js",
+    "seed:pricing": "node scripts/seed-pricing-and-zones.js",
+    "migrate:remove-company-spotlight": "node scripts/remove-company-spotlight.js"
   },
   "keywords": [],
   "author": "",
@@ -22,10 +24,12 @@
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "form-data": "^4.0.0",
+    "geoip-lite": "^1.4.10",
     "jsonwebtoken": "^9.0.3",
     "mailgun.js": "^10.2.1",
     "mongoose": "^9.2.1",
     "multer": "^2.0.0",
+    "razorpay": "^2.9.6",
     "zod": "^4.3.6"
   },
   "devDependencies": {

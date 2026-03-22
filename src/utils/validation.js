@@ -114,7 +114,8 @@ const createJobSchema = z.object({
     .trim(),
   deadline: z.string()
     .datetime('Application deadline is required')
-    .refine(val => new Date(val) > new Date(), 'Deadline must be in the future')
+    .refine(val => new Date(val) > new Date(), 'Deadline must be in the future'),
+  countryId: z.string().optional()
 });
 
 const updateJobSchema = createJobSchema.partial();
@@ -149,7 +150,8 @@ const createDraftJobSchema = z.object({
     .optional()),
   deadline: z.preprocess(emptyToUndefined, z.string()
     .datetime()
-    .optional())
+    .optional()),
+  countryId: z.preprocess(emptyToUndefined, z.string().optional())
 }).passthrough();
 
 const updateCompanyStatusSchema = z.object({

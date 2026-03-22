@@ -45,13 +45,13 @@ const seedDatabase = async () => {
 
     // Create subscription plans (INR pricing)
     const freePlan = await AvailableService.create({
-      name: 'Free',
+      name: 'Free Tier',
       tier: 'free',
       description: 'Basic access to job listings and limited applications',
-      maxApplications: null, // Uses SystemConfig value
+      maxApplications: 2,
       price: 0,
       currency: 'INR',
-      billingCycle: 'monthly',
+      billingCycle: 'one-time',
       features: [
         'Basic job search',
         '2 applications lifetime',
@@ -220,7 +220,8 @@ const seedDatabase = async () => {
       startDate: new Date(),
       endDate: new Date('2099-12-31'),
       status: 'active',
-      autoRenew: false
+      autoRenew: false,
+      applicationsUsed: 0
     });
 
     // Update student with subscription ID

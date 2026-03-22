@@ -6,7 +6,7 @@ const AvailableService = require('../models/AvailableService');
 const ActiveSubscription = require('../models/ActiveSubscription');
 const PaymentRecord = require('../models/PaymentRecord');
 const { checkSubscriptionStatus, getApplicationLimit } = require('../services/subscriptionService');
-const { getActiveApplicationCount } = require('../services/applicationService');
+const { getSubscriptionUsage } = require('../services/applicationService');
 
 const generateTransactionId = () => `txn_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 const DEFAULT_PRO_PLAN_NAME = process.env.PRO_PLAN_NAME?.trim() || 'Pro Plan';
@@ -53,10 +53,54 @@ const findDefaultProPlan = async (planKey = 'pro') => {
 exports.getAvailableServices = async (req, res) => {
   try {
     const services = await AvailableService.find({ isActive: true })
-      .select('name tier description maxApplications price currency billingCycle trialDays discount features badge displayOrder prioritySupport profileBoost applicationHighlight')
-      .sort({ displayOrder: 1, price: 1 });
+      .select('name tier description maxApplications price priceINR priceUSD currency billingCycle trialDays discount features badge displayOrder prioritySupport profileBoost applicationHighlight allZonesIncluded')
+      .sort({ displayOrder: 1, price: 1 })
+      .lean();
 
-    res.json({ services });
+    // Fetch zones for each plan
+    const PlanZone = require('../models/PlanZone');
+    const Zone = require('../models/Zone');
+
+    const serviceIds = services.map(s => s._id);
+    const planZones = await PlanZone.find({ planId: { $in: serviceIds } })
+      .populate('zoneId', 'name description')
+      .lean();
+
+    // Group zones by planId
+    const zonesByPlan = {};
+    for (const pz of planZones) {
+      if (!pz.zoneId) continue;
+      const planIdStr = pz.planId.toString();
+      if (!zonesByPlan[planIdStr]) {
+        zonesByPlan[planIdStr] = [];
+      }
+      zonesByPlan[planIdStr].push({
+        id: pz.zoneId._id,
+        name: pz.zoneId.name,
+        description: pz.zoneId.description
+      });
+    }
+
+    // For plans with allZonesIncluded, fetch all zones
+    const allZones = await Zone.find().select('name description').lean();
+    const allZonesFormatted = allZones.map(z => ({
+      id: z._id,
+      name: z.name,
+      description: z.description
+    }));
+
+    // Attach zones to each service
+    const servicesWithZones = services.map(service => {
+      const serviceIdStr = service._id.toString();
+      return {
+        ...service,
+        zones: service.allZonesIncluded
+          ? allZonesFormatted
+          : (zonesByPlan[serviceIdStr] || [])
+      };
+    });
+
+    res.json({ services: servicesWithZones });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
@@ -71,11 +115,9 @@ exports.getCurrentSubscription = async (req, res) => {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    // Get application limit and usage
+    // Get application limit and usage from subscription counter
     const applicationLimit = await getApplicationLimit(student._id);
-
-    // Count active applications (excluding withdrawn/rejected) - lifetime count for free tier
-    const applicationsUsed = await getActiveApplicationCount(student._id);
+    const { applicationsUsed } = await getSubscriptionUsage(student._id);
 
     const subscriptionState = await checkSubscriptionStatus(student._id);
 
@@ -117,24 +159,220 @@ exports.getCurrentSubscription = async (req, res) => {
   }
 };
 
-const calculateEndDate = (billingCycle, startDate = new Date()) => {
-  const end = new Date(startDate);
-
-  switch (billingCycle) {
-    case 'one-time':
-      return new Date('2099-12-31'); // Never expires
-    case 'yearly':
-      end.setFullYear(end.getFullYear() + 1);
-      return end;
-    case 'quarterly':
-      end.setMonth(end.getMonth() + 3);
-      return end;
-    case 'monthly':
-    default:
-      end.setMonth(end.getMonth() + 1);
-      return end;
+const createOrUpgradeSubscriptionForStudent = async ({
+  student,
+  service,
+  paymentMethod = 'manual',
+  currency = 'USD',
+  gatewayResponse = null,
+  createPaymentRecord = true,
+  paymentAmount = null
+}) => {
+  if (!student) {
+    const error = new Error('Student not found');
+    error.statusCode = 404;
+    throw error;
   }
+
+  if (!service) {
+    const error = new Error('Subscription service not found. Please configure the Pro plan or provide a valid serviceId.');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (service.tier === 'free') {
+    const error = new Error('Cannot subscribe to free tier through this endpoint');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const now = new Date();
+  let remainingApplications = 0;
+  let addonZonesToPreserve = [];
+  let currentSubscription = null;
+
+  // Check current subscription if exists
+  if (student.currentSubscriptionId) {
+    currentSubscription = await ActiveSubscription.findOne({
+      _id: student.currentSubscriptionId,
+      studentId: student._id,
+      status: { $in: ['active', 'pending'] }
+    }).populate('serviceId', 'maxApplications');
+
+    if (currentSubscription) {
+      // Block same plan purchase
+      if (currentSubscription.serviceId._id.toString() === service._id.toString()) {
+        const currentMax = currentSubscription.serviceId.maxApplications;
+        const used = currentSubscription.applicationsUsed || 0;
+        const remaining = currentMax === null ? Infinity : currentMax - used;
+
+        if (remaining > 0 || currentMax === null) {
+          const error = new Error('You already have an active subscription to this plan with remaining applications. Please use your current quota or upgrade to a different plan.');
+          error.statusCode = 400;
+          error.code = 'SAME_PLAN_ACTIVE';
+          throw error;
+        }
+      }
+
+      // Calculate remaining applications to stack
+      const currentMax = currentSubscription.serviceId.maxApplications;
+      const used = currentSubscription.applicationsUsed || 0;
+
+      if (currentMax !== null) {
+        remainingApplications = Math.max(0, currentMax - used);
+      }
+      // If currentMax is null (unlimited), we don't carry over anything special
+
+      // Get addon-purchased zones to preserve
+      const SubscriptionZone = require('../models/SubscriptionZone');
+      const addonZones = await SubscriptionZone.find({
+        subscriptionId: currentSubscription._id,
+        source: 'addon'
+      }).lean();
+
+      addonZonesToPreserve = addonZones.map(z => z.zoneId);
+
+      // Mark previous subscription as exhausted
+      await ActiveSubscription.updateOne(
+        { _id: currentSubscription._id },
+        { $set: { status: 'exhausted', autoRenew: false } }
+      );
+    }
+  }
+
+  // Calculate new maxApplications with stacking
+  let newMaxApplications = service.maxApplications;
+  if (newMaxApplications !== null && remainingApplications > 0) {
+    newMaxApplications = service.maxApplications + remainingApplications;
+  }
+
+  // Create new subscription with stacked quota
+  const subscription = await ActiveSubscription.create({
+    studentId: student._id,
+    serviceId: service._id,
+    startDate: now,
+    endDate: null, // Quota-based, not time-based
+    status: 'active',
+    autoRenew: false,
+    applicationsUsed: 0,
+    stackedApplications: remainingApplications
+  });
+
+  let paymentRecord = null;
+
+  if (createPaymentRecord) {
+    paymentRecord = await PaymentRecord.create({
+      studentId: student._id,
+      serviceId: service._id,
+      subscriptionId: subscription._id,
+      amount: paymentAmount ?? service.price,
+      currency: String(currency || 'USD').toUpperCase(),
+      paymentDate: now,
+      status: 'completed',
+      transactionId: generateTransactionId(),
+      paymentMethod,
+      gatewayResponse: {
+        ...gatewayResponse,
+        stackedApplications: remainingApplications,
+        previousSubscriptionId: currentSubscription?._id?.toString() || null
+      }
+    });
+  }
+
+  await Student.updateOne(
+    { _id: student._id },
+    {
+      $set: {
+        currentSubscriptionId: subscription._id,
+        subscriptionTier: service.tier === 'free' ? 'free' : 'paid'
+      }
+    }
+  );
+
+  // Populate subscription zones from plan configuration
+  const { ensureSubscriptionZonesForPlan } = require('../services/zonePricingService');
+  await ensureSubscriptionZonesForPlan({
+    subscriptionId: subscription._id,
+    serviceId: service._id
+  });
+
+  // Preserve addon-purchased zones from previous subscription
+  if (addonZonesToPreserve.length > 0) {
+    const SubscriptionZone = require('../models/SubscriptionZone');
+    const zoneOperations = addonZonesToPreserve.map(zoneId => ({
+      updateOne: {
+        filter: {
+          subscriptionId: subscription._id,
+          zoneId
+        },
+        update: {
+          $setOnInsert: {
+            subscriptionId: subscription._id,
+            zoneId,
+            source: 'addon',
+            createdAt: now
+          }
+        },
+        upsert: true
+      }
+    }));
+
+    await SubscriptionZone.bulkWrite(zoneOperations, { ordered: false });
+  }
+
+  // Also preserve addon records from previous subscription
+  if (currentSubscription) {
+    const SubscriptionAddon = require('../models/SubscriptionAddon');
+    const previousAddons = await SubscriptionAddon.find({
+      subscriptionId: currentSubscription._id
+    }).lean();
+
+    if (previousAddons.length > 0) {
+      const Addon = require('../models/Addon');
+      // Only preserve zone addons, not job addons (job credits are already counted in remaining)
+      const zoneAddonIds = await Addon.find({ type: 'zone' }).distinct('_id');
+      const zoneAddonIdStrings = zoneAddonIds.map(id => id.toString());
+
+      const zoneAddonsToPreserve = previousAddons.filter(
+        addon => zoneAddonIdStrings.includes(addon.addonId.toString())
+      );
+
+      if (zoneAddonsToPreserve.length > 0) {
+        const addonOperations = zoneAddonsToPreserve.map(addon => ({
+          updateOne: {
+            filter: {
+              subscriptionId: subscription._id,
+              addonId: addon.addonId
+            },
+            update: {
+              $setOnInsert: {
+                subscriptionId: subscription._id,
+                addonId: addon.addonId,
+                paymentRecordId: addon.paymentRecordId,
+                quantity: addon.quantity,
+                createdAt: now
+              }
+            },
+            upsert: true
+          }
+        }));
+
+        await SubscriptionAddon.bulkWrite(addonOperations, { ordered: false });
+      }
+    }
+  }
+
+  const populatedSubscription = await ActiveSubscription.findById(subscription._id)
+    .populate('serviceId', 'name description maxApplications price features');
+
+  return {
+    subscription: populatedSubscription,
+    payment: paymentRecord,
+    stackedApplications: remainingApplications
+  };
 };
+
+exports.createOrUpgradeSubscriptionForStudent = createOrUpgradeSubscriptionForStudent;
 
 exports.createOrUpgradeSubscription = async (req, res) => {
   try {
@@ -169,71 +407,28 @@ exports.createOrUpgradeSubscription = async (req, res) => {
       return res.status(404).json({ error: 'Subscription service not found. Please configure the Pro plan or provide a valid serviceId.' });
     }
 
-    // Prevent subscribing to free tier via this endpoint
-    if (service.tier === 'free') {
-      return res.status(400).json({ error: 'Cannot subscribe to free tier through this endpoint' });
-    }
-
-    const now = new Date();
-    const endDate = calculateEndDate(service.billingCycle, now);
-
-    // One-time plans cannot auto-renew
-    const shouldAutoRenew = service.billingCycle === 'one-time' ? false : Boolean(autoRenew);
-
-    if (student.currentSubscriptionId) {
-      // Get current subscription to check if it's a free plan
-      const currentSub = await ActiveSubscription.findById(student.currentSubscriptionId)
-        .populate('serviceId', 'tier');
-
-      // Cancel current subscription if it's not a free tier
-      if (currentSub && currentSub.serviceId?.tier !== 'free') {
-        await ActiveSubscription.updateOne(
-          { _id: student.currentSubscriptionId, studentId: student._id, status: { $in: ['active', 'pending'] } },
-          { $set: { status: 'cancelled', autoRenew: false } }
-        );
-      }
-    }
-
-    const subscription = await ActiveSubscription.create({
-      studentId: student._id,
-      serviceId: service._id,
-      startDate: now,
-      endDate,
-      status: 'active',
-      autoRenew: shouldAutoRenew
-    });
-
-    const paymentRecord = await PaymentRecord.create({
-      studentId: student._id,
-      subscriptionId: subscription._id,
-      amount: service.price,
-      currency: String(currency || 'USD').toUpperCase(),
-      paymentDate: now,
-      status: 'completed',
-      transactionId: generateTransactionId(),
+    const result = await createOrUpgradeSubscriptionForStudent({
+      student,
+      service,
+      autoRenew,
       paymentMethod,
-      gatewayResponse
+      currency,
+      gatewayResponse,
+      createPaymentRecord: true,
+      paymentAmount: service.price
     });
-
-    await Student.updateOne(
-      { _id: student._id },
-      {
-        $set: {
-          currentSubscriptionId: subscription._id,
-          subscriptionTier: 'paid'
-        }
-      }
-    );
-
-    const populatedSubscription = await ActiveSubscription.findById(subscription._id)
-      .populate('serviceId', 'name description maxApplications price features');
 
     res.status(201).json({
-      subscription: populatedSubscription,
-      payment: paymentRecord
+      subscription: result.subscription,
+      payment: result.payment
     });
   } catch (error) {
     console.error(error);
+
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
+
     res.status(500).json({ error: 'Server error' });
   }
 };

@@ -8,6 +8,9 @@ const AvailableService = require('../models/AvailableService');
 const ActiveSubscription = require('../models/ActiveSubscription');
 const PaymentRecord = require('../models/PaymentRecord');
 const SystemConfig = require('../models/SystemConfig');
+const Zone = require('../models/Zone');
+const ZoneCountry = require('../models/ZoneCountry');
+const PlanZone = require('../models/PlanZone');
 const emailService = require('../services/emailService');
 const notificationService = require('../services/notificationService');
 const {
@@ -25,6 +28,31 @@ const {
 } = require('../services/companyProfileService');
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const buildSubscriptionPlanResponse = (plan) => ({
+  id: plan._id,
+  name: plan.name,
+  description: plan.description,
+  maxApplications: plan.maxApplications,
+  price: plan.price,
+  priceINR: plan.priceINR,
+  priceUSD: plan.priceUSD,
+  currency: plan.currency,
+  billingCycle: 'one-time',
+  discount: plan.discount,
+  features: plan.features,
+  badge: plan.badge,
+  displayOrder: plan.displayOrder,
+  resumeDownloads: plan.resumeDownloads,
+  videoViews: plan.videoViews,
+  prioritySupport: plan.prioritySupport,
+  profileBoost: plan.profileBoost,
+  applicationHighlight: plan.applicationHighlight,
+  allZonesIncluded: plan.allZonesIncluded,
+  isActive: plan.isActive,
+  createdAt: plan.createdAt,
+  updatedAt: plan.updatedAt
+});
 
 exports.getDashboard = async (req, res) => {
   try {
@@ -1054,7 +1082,7 @@ exports.getStudentProfile = async (req, res) => {
       student.introVideoUrl ? getPresignedUrl(student.introVideoUrl) : null
     ]);
 
-    // Get payment history
+    // Get payment history with detailed type information
     const payments = await PaymentRecord.find({ studentId: student._id })
       .populate({
         path: 'subscriptionId',
@@ -1063,7 +1091,30 @@ exports.getStudentProfile = async (req, res) => {
           select: 'name price'
         }
       })
+      .populate('serviceId', 'name price')
       .sort({ paymentDate: -1 });
+
+    // Get pay-per-job purchases for this student to enrich payment data
+    const PayPerJobPurchase = require('../models/PayPerJobPurchase');
+    const JobPosting = require('../models/JobPosting');
+    const payPerJobPurchases = await PayPerJobPurchase.find({
+      studentId: student._id
+    }).populate('jobPostingId', 'title').lean();
+    // Map by razorpayOrderId for lookup
+    const payPerJobByOrderId = new Map(
+      payPerJobPurchases
+        .filter(p => p.razorpayOrderId)
+        .map(p => [p.razorpayOrderId, p])
+    );
+
+    // Get subscription addons to enrich payment data
+    const SubscriptionAddon = require('../models/SubscriptionAddon');
+    const subscriptionAddons = await SubscriptionAddon.find({
+      paymentRecordId: { $in: payments.map(p => p._id) }
+    }).populate('addonId', 'name type').lean();
+    const addonByPaymentId = new Map(
+      subscriptionAddons.map(sa => [sa.paymentRecordId.toString(), sa])
+    );
 
     // Get all applications with job details
     const applications = await Application.find({ studentId: student._id })
@@ -1111,19 +1162,72 @@ exports.getStudentProfile = async (req, res) => {
           } : null
         } : null
       },
-      payments: payments.map(p => ({
-        id: p._id,
-        amount: p.amount,
-        currency: p.currency,
-        status: p.status,
-        paymentDate: p.paymentDate,
-        paymentMethod: p.paymentMethod,
-        transactionId: p.transactionId,
-        plan: p.subscriptionId?.serviceId ? {
-          name: p.subscriptionId.serviceId.name,
-          price: p.subscriptionId.serviceId.price
-        } : null
-      })),
+      payments: payments.map(p => {
+        // Determine payment type from gatewayResponse or related records
+        let paymentType = 'unknown';
+        let typeLabel = 'Unknown';
+        let details = null;
+
+        const gatewayType = p.gatewayResponse?.type;
+        // Get order ID from either field or gatewayResponse
+        const orderId = p.razorpayOrderId || p.gatewayResponse?.orderId;
+
+        if (gatewayType === 'pay_per_job') {
+          paymentType = 'pay-per-job';
+          typeLabel = 'Pay Per Job';
+          // Look up by order ID from gatewayResponse
+          const purchase = payPerJobByOrderId.get(orderId);
+          if (purchase?.jobPostingId) {
+            details = {
+              jobId: purchase.jobPostingId._id,
+              jobTitle: purchase.jobPostingId.title
+            };
+          }
+        } else if (gatewayType === 'zone_addon') {
+          paymentType = 'zone-addon';
+          typeLabel = 'Zone Addon';
+          const addon = addonByPaymentId.get(p._id.toString());
+          if (addon?.addonId) {
+            details = {
+              addonId: addon.addonId._id,
+              addonName: addon.addonId.name
+            };
+          }
+        } else if (p.subscriptionId?.serviceId) {
+          // Has subscription = plan purchase (completed or pending)
+          paymentType = 'plan';
+          typeLabel = 'Plan Purchase';
+          details = {
+            planId: p.subscriptionId.serviceId._id,
+            planName: p.subscriptionId.serviceId.name,
+            planPrice: p.subscriptionId.serviceId.price
+          };
+        } else if (p.serviceId) {
+          // Has serviceId but no subscription = pending plan purchase
+          paymentType = 'plan';
+          typeLabel = 'Plan Purchase';
+          details = {
+            planId: p.serviceId._id,
+            planName: p.serviceId.name,
+            planPrice: p.serviceId.price
+          };
+        }
+
+        return {
+          id: p._id,
+          type: paymentType,
+          typeLabel,
+          amount: p.amount,
+          currency: p.currency,
+          status: p.status,
+          paymentDate: p.paymentDate,
+          paymentMethod: p.paymentMethod,
+          razorpayOrderId: orderId || null,
+          razorpayPaymentId: p.razorpayPaymentId || null,
+          transactionId: p.razorpayPaymentId || p.transactionId,
+          details
+        };
+      }),
       applications: applications.map(app => ({
         id: app._id,
         status: app.status,
@@ -1153,7 +1257,7 @@ exports.getStudentProfile = async (req, res) => {
 exports.assignStudentSubscription = async (req, res) => {
   try {
     const { studentId } = req.params;
-    const { serviceId, endDate, autoRenew = false } = req.body;
+    const { serviceId } = req.body;
 
     if (!mongoose.Types.ObjectId.isValid(studentId)) {
       return res.status(400).json({ error: 'Invalid student ID format' });
@@ -1175,7 +1279,7 @@ exports.assignStudentSubscription = async (req, res) => {
       return res.status(404).json({ error: 'Subscription plan not found' });
     }
 
-    // Cancel current subscription if exists and is not free
+    // Mark current subscription as exhausted if exists and is not free
     if (student.currentSubscriptionId) {
       const currentSub = await ActiveSubscription.findById(student.currentSubscriptionId)
         .populate('serviceId', 'tier');
@@ -1183,46 +1287,23 @@ exports.assignStudentSubscription = async (req, res) => {
       if (currentSub && currentSub.serviceId?.tier !== 'free') {
         await ActiveSubscription.updateOne(
           { _id: student.currentSubscriptionId },
-          { $set: { status: 'cancelled', autoRenew: false } }
+          { $set: { status: 'exhausted', autoRenew: false } }
         );
       }
     }
 
-    // Calculate end date based on billing cycle
     const now = new Date();
-    let calculatedEndDate;
 
-    if (endDate) {
-      calculatedEndDate = new Date(endDate);
-    } else {
-      switch (service.billingCycle) {
-        case 'one-time':
-          calculatedEndDate = new Date('2099-12-31');
-          break;
-        case 'yearly':
-          calculatedEndDate = new Date(now);
-          calculatedEndDate.setFullYear(calculatedEndDate.getFullYear() + 1);
-          break;
-        case 'quarterly':
-          calculatedEndDate = new Date(now);
-          calculatedEndDate.setMonth(calculatedEndDate.getMonth() + 3);
-          break;
-        case 'monthly':
-        default:
-          calculatedEndDate = new Date(now);
-          calculatedEndDate.setMonth(calculatedEndDate.getMonth() + 1);
-          break;
-      }
-    }
-
-    // Create new subscription
+    // Create new quota-based subscription
     const subscription = await ActiveSubscription.create({
       studentId: student._id,
       serviceId: service._id,
       startDate: now,
-      endDate: calculatedEndDate,
+      endDate: null,
       status: 'active',
-      autoRenew: service.billingCycle === 'one-time' ? false : Boolean(autoRenew)
+      autoRenew: false,
+      applicationsUsed: 0,
+      maxApplications: service.maxApplications
     });
 
     // Update student
@@ -1274,28 +1355,7 @@ exports.getSubscriptionPlans = async (req, res) => {
     const plans = await AvailableService.find(filter).sort({ displayOrder: 1, createdAt: -1 });
 
     res.json({
-      plans: plans.map(plan => ({
-        id: plan._id,
-        name: plan.name,
-        description: plan.description,
-        maxApplications: plan.maxApplications,
-        price: plan.price,
-        currency: plan.currency,
-        billingCycle: plan.billingCycle,
-        trialDays: plan.trialDays,
-        discount: plan.discount,
-        features: plan.features,
-        badge: plan.badge,
-        displayOrder: plan.displayOrder,
-        resumeDownloadsPerMonth: plan.resumeDownloadsPerMonth,
-        videoViewsPerMonth: plan.videoViewsPerMonth,
-        prioritySupport: plan.prioritySupport,
-        profileBoost: plan.profileBoost,
-        applicationHighlight: plan.applicationHighlight,
-        isActive: plan.isActive,
-        createdAt: plan.createdAt,
-        updatedAt: plan.updatedAt
-      }))
+      plans: plans.map(buildSubscriptionPlanResponse)
     });
   } catch (error) {
     console.error(error);
@@ -1317,28 +1377,7 @@ exports.getSubscriptionPlan = async (req, res) => {
       return res.status(404).json({ error: 'Subscription plan not found' });
     }
 
-    res.json({
-      id: plan._id,
-      name: plan.name,
-      description: plan.description,
-      maxApplications: plan.maxApplications,
-      price: plan.price,
-      currency: plan.currency,
-      billingCycle: plan.billingCycle,
-      trialDays: plan.trialDays,
-      discount: plan.discount,
-      features: plan.features,
-      badge: plan.badge,
-      displayOrder: plan.displayOrder,
-      resumeDownloadsPerMonth: plan.resumeDownloadsPerMonth,
-      videoViewsPerMonth: plan.videoViewsPerMonth,
-      prioritySupport: plan.prioritySupport,
-      profileBoost: plan.profileBoost,
-      applicationHighlight: plan.applicationHighlight,
-      isActive: plan.isActive,
-      createdAt: plan.createdAt,
-      updatedAt: plan.updatedAt
-    });
+    res.json(buildSubscriptionPlanResponse(plan));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
@@ -1352,18 +1391,19 @@ exports.createSubscriptionPlan = async (req, res) => {
       description,
       maxApplications,
       price,
+      priceINR,
+      priceUSD,
       currency,
-      billingCycle,
-      trialDays,
       discount,
       features,
       badge,
       displayOrder,
-      resumeDownloadsPerMonth,
-      videoViewsPerMonth,
+      resumeDownloads,
+      videoViews,
       prioritySupport,
       profileBoost,
       applicationHighlight,
+      allZonesIncluded,
       isActive
     } = req.body;
 
@@ -1375,59 +1415,50 @@ exports.createSubscriptionPlan = async (req, res) => {
       return res.status(400).json({ error: 'Description must be at least 10 characters' });
     }
 
-    if (price === undefined || price < 0) {
-      return res.status(400).json({ error: 'Price must be a non-negative number' });
+    // Use priceINR as the primary price, fallback to price
+    const inrPrice = priceINR ?? price;
+    if (inrPrice === undefined || inrPrice < 0) {
+      return res.status(400).json({ error: 'Price (INR) must be a non-negative number' });
+    }
+
+    if (priceUSD !== undefined && priceUSD !== null && priceUSD < 0) {
+      return res.status(400).json({ error: 'Price (USD) must be a non-negative number' });
     }
 
     if (currency && !CURRENCIES.includes(currency)) {
       return res.status(400).json({ error: `Currency must be one of: ${CURRENCIES.join(', ')}` });
     }
 
-    if (billingCycle && !BILLING_CYCLES.includes(billingCycle)) {
-      return res.status(400).json({ error: `Billing cycle must be one of: ${BILLING_CYCLES.join(', ')}` });
+    // Normalize empty string / undefined to null (null = unlimited)
+    const normalizedMaxApplications = (maxApplications === '' || maxApplications === undefined) ? null : maxApplications;
+
+    if (normalizedMaxApplications !== null && normalizedMaxApplications < 1) {
+      return res.status(400).json({ error: 'maxApplications must be at least 1, or omit it for unlimited' });
     }
 
     const plan = await AvailableService.create({
       name: name.trim(),
       description: description.trim(),
-      maxApplications: maxApplications || null,
-      price,
-      currency: currency || 'USD',
-      billingCycle: billingCycle || 'monthly',
-      trialDays: trialDays || 0,
+      maxApplications: normalizedMaxApplications,
+      price: inrPrice,
+      priceINR: inrPrice,
+      priceUSD: priceUSD ?? 0,
+      currency: currency || 'INR',
+      billingCycle: 'one-time',
       discount: discount || 0,
       features: features || [],
       badge: badge?.trim() || null,
       displayOrder: displayOrder || 0,
-      resumeDownloadsPerMonth: resumeDownloadsPerMonth || null,
-      videoViewsPerMonth: videoViewsPerMonth || null,
+      resumeDownloads: resumeDownloads || null,
+      videoViews: videoViews || null,
       prioritySupport: prioritySupport || false,
       profileBoost: profileBoost || false,
       applicationHighlight: applicationHighlight || false,
+      allZonesIncluded: allZonesIncluded || false,
       isActive: isActive !== false
     });
 
-    res.status(201).json({
-      id: plan._id,
-      name: plan.name,
-      description: plan.description,
-      maxApplications: plan.maxApplications,
-      price: plan.price,
-      currency: plan.currency,
-      billingCycle: plan.billingCycle,
-      trialDays: plan.trialDays,
-      discount: plan.discount,
-      features: plan.features,
-      badge: plan.badge,
-      displayOrder: plan.displayOrder,
-      resumeDownloadsPerMonth: plan.resumeDownloadsPerMonth,
-      videoViewsPerMonth: plan.videoViewsPerMonth,
-      prioritySupport: plan.prioritySupport,
-      profileBoost: plan.profileBoost,
-      applicationHighlight: plan.applicationHighlight,
-      isActive: plan.isActive,
-      createdAt: plan.createdAt
-    });
+    res.status(201).json(buildSubscriptionPlanResponse(plan));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
@@ -1453,18 +1484,19 @@ exports.updateSubscriptionPlan = async (req, res) => {
       description,
       maxApplications,
       price,
+      priceINR,
+      priceUSD,
       currency,
-      billingCycle,
-      trialDays,
       discount,
       features,
       badge,
       displayOrder,
-      resumeDownloadsPerMonth,
-      videoViewsPerMonth,
+      resumeDownloads,
+      videoViews,
       prioritySupport,
       profileBoost,
       applicationHighlight,
+      allZonesIncluded,
       isActive
     } = req.body;
 
@@ -1482,11 +1514,21 @@ exports.updateSubscriptionPlan = async (req, res) => {
       plan.description = description.trim();
     }
 
-    if (price !== undefined) {
-      if (price < 0) {
-        return res.status(400).json({ error: 'Price must be a non-negative number' });
+    // Handle price updates - support both price and priceINR
+    if (price !== undefined || priceINR !== undefined) {
+      const newPrice = priceINR ?? price;
+      if (newPrice < 0) {
+        return res.status(400).json({ error: 'Price (INR) must be a non-negative number' });
       }
-      plan.price = price;
+      plan.price = newPrice;
+      plan.priceINR = newPrice;
+    }
+
+    if (priceUSD !== undefined) {
+      if (priceUSD !== null && priceUSD < 0) {
+        return res.status(400).json({ error: 'Price (USD) must be a non-negative number' });
+      }
+      plan.priceUSD = priceUSD;
     }
 
     if (currency !== undefined) {
@@ -1496,50 +1538,34 @@ exports.updateSubscriptionPlan = async (req, res) => {
       plan.currency = currency;
     }
 
-    if (billingCycle !== undefined) {
-      if (!BILLING_CYCLES.includes(billingCycle)) {
-        return res.status(400).json({ error: `Billing cycle must be one of: ${BILLING_CYCLES.join(', ')}` });
+    if (maxApplications !== undefined) {
+      if (plan.tier === 'free') {
+        // Free plan limit is permanently fixed at 2
+        plan.maxApplications = 2;
+      } else {
+        // Normalize empty string to null (unlimited)
+        const normalizedMax = maxApplications === '' ? null : maxApplications;
+        if (normalizedMax !== null && normalizedMax < 1) {
+          return res.status(400).json({ error: 'maxApplications must be at least 1, or null for unlimited' });
+        }
+        plan.maxApplications = normalizedMax;
       }
-      plan.billingCycle = billingCycle;
     }
-
-    if (maxApplications !== undefined) plan.maxApplications = maxApplications || null;
-    if (trialDays !== undefined) plan.trialDays = trialDays;
     if (discount !== undefined) plan.discount = discount;
     if (features !== undefined) plan.features = features;
     if (badge !== undefined) plan.badge = badge?.trim() || null;
     if (displayOrder !== undefined) plan.displayOrder = displayOrder;
-    if (resumeDownloadsPerMonth !== undefined) plan.resumeDownloadsPerMonth = resumeDownloadsPerMonth || null;
-    if (videoViewsPerMonth !== undefined) plan.videoViewsPerMonth = videoViewsPerMonth || null;
+    if (resumeDownloads !== undefined) plan.resumeDownloads = resumeDownloads || null;
+    if (videoViews !== undefined) plan.videoViews = videoViews || null;
     if (prioritySupport !== undefined) plan.prioritySupport = prioritySupport;
     if (profileBoost !== undefined) plan.profileBoost = profileBoost;
     if (applicationHighlight !== undefined) plan.applicationHighlight = applicationHighlight;
+    if (allZonesIncluded !== undefined) plan.allZonesIncluded = allZonesIncluded;
     if (isActive !== undefined) plan.isActive = isActive;
 
     await plan.save();
 
-    res.json({
-      id: plan._id,
-      name: plan.name,
-      description: plan.description,
-      maxApplications: plan.maxApplications,
-      price: plan.price,
-      currency: plan.currency,
-      billingCycle: plan.billingCycle,
-      trialDays: plan.trialDays,
-      discount: plan.discount,
-      features: plan.features,
-      badge: plan.badge,
-      displayOrder: plan.displayOrder,
-      resumeDownloadsPerMonth: plan.resumeDownloadsPerMonth,
-      videoViewsPerMonth: plan.videoViewsPerMonth,
-      prioritySupport: plan.prioritySupport,
-      profileBoost: plan.profileBoost,
-      applicationHighlight: plan.applicationHighlight,
-      isActive: plan.isActive,
-      createdAt: plan.createdAt,
-      updatedAt: plan.updatedAt
-    });
+    res.json(buildSubscriptionPlanResponse(plan));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
@@ -1575,15 +1601,14 @@ exports.deleteSubscriptionPlan = async (req, res) => {
 
 exports.getFreeTierConfig = async (req, res) => {
   try {
-    const [maxApplications, features, resumeDownloads, videoViews] = await Promise.all([
-      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_MAX_APPLICATIONS, 2),
+    const [features, resumeDownloads, videoViews] = await Promise.all([
       SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_FEATURES, []),
       SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_RESUME_DOWNLOADS, null),
       SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_VIDEO_VIEWS, null)
     ]);
 
     res.json({
-      maxApplications,
+      maxApplications: 2,
       features,
       resumeDownloadsPerMonth: resumeDownloads,
       videoViewsPerMonth: videoViews
@@ -1601,13 +1626,13 @@ exports.updateFreeTierConfig = async (req, res) => {
     const updates = [];
 
     if (maxApplications !== undefined) {
-      if (maxApplications !== null && (maxApplications < 0 || !Number.isInteger(maxApplications))) {
-        return res.status(400).json({ error: 'Max applications must be a non-negative integer or null for unlimited' });
+      if (maxApplications !== 2) {
+        return res.status(400).json({ error: 'Free tier max applications is fixed at 2' });
       }
       updates.push(
         SystemConfig.setValue(
           CONFIG_KEYS.FREE_TIER_MAX_APPLICATIONS,
-          maxApplications,
+          2,
           'Maximum applications allowed for free tier',
           req.user.userId
         )
@@ -1657,21 +1682,506 @@ exports.updateFreeTierConfig = async (req, res) => {
     await Promise.all(updates);
 
     // Return updated config
-    const [updatedMaxApps, updatedFeatures, updatedResumeDownloads, updatedVideoViews] = await Promise.all([
-      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_MAX_APPLICATIONS, 2),
+    const [updatedFeatures, updatedResumeDownloads, updatedVideoViews] = await Promise.all([
       SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_FEATURES, []),
       SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_RESUME_DOWNLOADS, null),
       SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_VIDEO_VIEWS, null)
     ]);
 
     res.json({
-      maxApplications: updatedMaxApps,
+      maxApplications: 2,
       features: updatedFeatures,
       resumeDownloadsPerMonth: updatedResumeDownloads,
       videoViewsPerMonth: updatedVideoViews
     });
   } catch (error) {
     console.error(error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// ─── Zone Management ─────────────────────────────────────────────────────────
+
+exports.getZones = async (req, res) => {
+  try {
+    const zones = await Zone.find().sort({ name: 1 }).lean();
+
+    const zonesWithCountries = await Promise.all(zones.map(async (zone) => {
+      const countries = await ZoneCountry.find({ zoneId: zone._id })
+        .select('_id countryName')
+        .sort({ countryName: 1 })
+        .lean();
+
+      return {
+        id: zone._id,
+        name: zone.name,
+        description: zone.description,
+        countries: countries.map(c => ({ id: c._id, name: c.countryName })),
+        countryCount: countries.length
+      };
+    }));
+
+    res.json({ zones: zonesWithCountries });
+  } catch (error) {
+    console.error('Get zones error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.createZone = async (req, res) => {
+  try {
+    const { name, description } = req.body;
+
+    if (!name || !description) {
+      return res.status(400).json({ error: 'Name and description are required' });
+    }
+
+    const existingZone = await Zone.findOne({ name: name.trim() });
+    if (existingZone) {
+      return res.status(409).json({ error: 'Zone with this name already exists' });
+    }
+
+    const zone = await Zone.create({
+      name: name.trim(),
+      description: description.trim()
+    });
+
+    res.status(201).json({
+      id: zone._id,
+      name: zone.name,
+      description: zone.description,
+      countries: [],
+      countryCount: 0
+    });
+  } catch (error) {
+    console.error('Create zone error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.updateZone = async (req, res) => {
+  try {
+    const { zoneId } = req.params;
+    const { name, description } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(zoneId)) {
+      return res.status(400).json({ error: 'Invalid zone ID' });
+    }
+
+    const zone = await Zone.findById(zoneId);
+    if (!zone) {
+      return res.status(404).json({ error: 'Zone not found' });
+    }
+
+    if (name !== undefined) {
+      const existingZone = await Zone.findOne({
+        name: name.trim(),
+        _id: { $ne: zoneId }
+      });
+      if (existingZone) {
+        return res.status(409).json({ error: 'Zone with this name already exists' });
+      }
+      zone.name = name.trim();
+    }
+
+    if (description !== undefined) {
+      zone.description = description.trim();
+    }
+
+    await zone.save();
+
+    res.json({
+      id: zone._id,
+      name: zone.name,
+      description: zone.description
+    });
+  } catch (error) {
+    console.error('Update zone error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.deleteZone = async (req, res) => {
+  try {
+    const { zoneId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(zoneId)) {
+      return res.status(400).json({ error: 'Invalid zone ID' });
+    }
+
+    const planCount = await PlanZone.countDocuments({ zoneId });
+    if (planCount > 0) {
+      return res.status(400).json({
+        error: 'Cannot delete zone that is assigned to plans',
+        planCount
+      });
+    }
+
+    const countries = await ZoneCountry.find({ zoneId }).select('_id');
+    const countryIds = countries.map(c => c._id);
+
+    const JobPosting = require('../models/JobPosting');
+    const jobCount = await JobPosting.countDocuments({ countryId: { $in: countryIds } });
+    if (jobCount > 0) {
+      return res.status(400).json({
+        error: 'Cannot delete zone with countries that have jobs assigned',
+        jobCount
+      });
+    }
+
+    await ZoneCountry.deleteMany({ zoneId });
+    await Zone.findByIdAndDelete(zoneId);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete zone error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.addCountryToZone = async (req, res) => {
+  try {
+    const { zoneId } = req.params;
+    const { countryName } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(zoneId)) {
+      return res.status(400).json({ error: 'Invalid zone ID' });
+    }
+
+    if (!countryName || typeof countryName !== 'string') {
+      return res.status(400).json({ error: 'Country name is required' });
+    }
+
+    const zone = await Zone.findById(zoneId);
+    if (!zone) {
+      return res.status(404).json({ error: 'Zone not found' });
+    }
+
+    const existingCountry = await ZoneCountry.findOne({
+      countryName: countryName.trim()
+    });
+    if (existingCountry) {
+      return res.status(409).json({
+        error: 'Country already exists',
+        existingZoneId: existingCountry.zoneId
+      });
+    }
+
+    const country = await ZoneCountry.create({
+      zoneId,
+      countryName: countryName.trim()
+    });
+
+    res.status(201).json({
+      id: country._id,
+      name: country.countryName,
+      zoneId: country.zoneId
+    });
+  } catch (error) {
+    console.error('Add country to zone error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.removeCountryFromZone = async (req, res) => {
+  try {
+    const { zoneId, countryId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(zoneId) || !mongoose.Types.ObjectId.isValid(countryId)) {
+      return res.status(400).json({ error: 'Invalid zone or country ID' });
+    }
+
+    const country = await ZoneCountry.findOne({ _id: countryId, zoneId });
+    if (!country) {
+      return res.status(404).json({ error: 'Country not found in this zone' });
+    }
+
+    const JobPosting = require('../models/JobPosting');
+    const jobCount = await JobPosting.countDocuments({ countryId });
+    if (jobCount > 0) {
+      return res.status(400).json({
+        error: 'Cannot remove country that has jobs assigned',
+        jobCount
+      });
+    }
+
+    await ZoneCountry.findByIdAndDelete(countryId);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Remove country from zone error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.getPlanZones = async (req, res) => {
+  try {
+    const { planId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(planId)) {
+      return res.status(400).json({ error: 'Invalid plan ID' });
+    }
+
+    const AvailableService = require('../models/AvailableService');
+    const plan = await AvailableService.findById(planId);
+    if (!plan) {
+      return res.status(404).json({ error: 'Plan not found' });
+    }
+
+    const planZones = await PlanZone.find({ planId })
+      .populate('zoneId', 'name description')
+      .lean();
+
+    const zones = planZones
+      .filter(pz => pz.zoneId)
+      .map(pz => ({
+        id: pz.zoneId._id,
+        name: pz.zoneId.name,
+        description: pz.zoneId.description
+      }));
+
+    res.json({
+      planId,
+      planName: plan.name,
+      allZonesIncluded: plan.allZonesIncluded,
+      zones
+    });
+  } catch (error) {
+    console.error('Get plan zones error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.setPlanZones = async (req, res) => {
+  try {
+    const { planId } = req.params;
+    const { zoneIds, allZonesIncluded } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(planId)) {
+      return res.status(400).json({ error: 'Invalid plan ID' });
+    }
+
+    const AvailableService = require('../models/AvailableService');
+    const plan = await AvailableService.findById(planId);
+    if (!plan) {
+      return res.status(404).json({ error: 'Plan not found' });
+    }
+
+    if (typeof allZonesIncluded === 'boolean') {
+      plan.allZonesIncluded = allZonesIncluded;
+      await plan.save();
+    }
+
+    if (plan.allZonesIncluded) {
+      await PlanZone.deleteMany({ planId });
+      return res.json({
+        planId,
+        planName: plan.name,
+        allZonesIncluded: true,
+        zones: []
+      });
+    }
+
+    if (!Array.isArray(zoneIds)) {
+      return res.status(400).json({ error: 'zoneIds must be an array' });
+    }
+
+    const validZoneIds = zoneIds.filter(id => mongoose.Types.ObjectId.isValid(id));
+    const zones = await Zone.find({ _id: { $in: validZoneIds } });
+
+    if (zones.length !== validZoneIds.length) {
+      return res.status(400).json({ error: 'Some zone IDs are invalid' });
+    }
+
+    await PlanZone.deleteMany({ planId });
+
+    if (validZoneIds.length > 0) {
+      const planZonesDocs = validZoneIds.map(zoneId => ({
+        planId,
+        zoneId
+      }));
+      await PlanZone.insertMany(planZonesDocs);
+    }
+
+    res.json({
+      planId,
+      planName: plan.name,
+      allZonesIncluded: plan.allZonesIncluded,
+      zones: zones.map(z => ({
+        id: z._id,
+        name: z.name,
+        description: z.description
+      }))
+    });
+  } catch (error) {
+    console.error('Set plan zones error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// ===========================
+// Addon Management
+// ===========================
+
+exports.getAddons = async (req, res) => {
+  try {
+    const Addon = require('../models/Addon');
+    const addons = await Addon.find().sort({ type: 1, name: 1 }).lean();
+
+    const formattedAddons = addons.map(a => ({
+      id: a._id,
+      name: a.name,
+      type: a.type,
+      priceINR: a.priceINR,
+      priceUSD: a.priceUSD,
+      zoneCount: a.zoneCount,
+      jobCreditCount: a.jobCreditCount,
+      unlockAllZones: a.unlockAllZones,
+      createdAt: a.createdAt
+    }));
+
+    res.json({ addons: formattedAddons });
+  } catch (error) {
+    console.error('Get addons error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.createAddon = async (req, res) => {
+  try {
+    const Addon = require('../models/Addon');
+    const { name, type, priceINR, priceUSD, zoneCount, jobCreditCount, unlockAllZones } = req.body;
+
+    if (!name || !type) {
+      return res.status(400).json({ error: 'Name and type are required' });
+    }
+
+    if (!['zone', 'jobs'].includes(type)) {
+      return res.status(400).json({ error: 'Type must be zone or jobs' });
+    }
+
+    const existingAddon = await Addon.findOne({ name: name.trim() });
+    if (existingAddon) {
+      return res.status(409).json({ error: 'Addon with this name already exists' });
+    }
+
+    const addonData = {
+      name: name.trim(),
+      type,
+      priceINR: priceINR || null,
+      priceUSD: priceUSD || null
+    };
+
+    if (type === 'zone') {
+      addonData.unlockAllZones = unlockAllZones || false;
+      if (!unlockAllZones) {
+        addonData.zoneCount = zoneCount;
+      }
+    } else if (type === 'jobs') {
+      addonData.jobCreditCount = jobCreditCount;
+    }
+
+    const addon = await Addon.create(addonData);
+
+    res.status(201).json({
+      id: addon._id,
+      name: addon.name,
+      type: addon.type,
+      priceINR: addon.priceINR,
+      priceUSD: addon.priceUSD,
+      zoneCount: addon.zoneCount,
+      jobCreditCount: addon.jobCreditCount,
+      unlockAllZones: addon.unlockAllZones
+    });
+  } catch (error) {
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error('Create addon error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.updateAddon = async (req, res) => {
+  try {
+    const Addon = require('../models/Addon');
+    const { addonId } = req.params;
+    const { name, priceINR, priceUSD, zoneCount, jobCreditCount, unlockAllZones } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(addonId)) {
+      return res.status(400).json({ error: 'Invalid addon ID' });
+    }
+
+    const addon = await Addon.findById(addonId);
+    if (!addon) {
+      return res.status(404).json({ error: 'Addon not found' });
+    }
+
+    if (name !== undefined) {
+      const existingAddon = await Addon.findOne({
+        name: name.trim(),
+        _id: { $ne: addonId }
+      });
+      if (existingAddon) {
+        return res.status(409).json({ error: 'Addon with this name already exists' });
+      }
+      addon.name = name.trim();
+    }
+
+    if (priceINR !== undefined) addon.priceINR = priceINR;
+    if (priceUSD !== undefined) addon.priceUSD = priceUSD;
+
+    if (addon.type === 'zone') {
+      if (unlockAllZones !== undefined) addon.unlockAllZones = unlockAllZones;
+      if (zoneCount !== undefined && !addon.unlockAllZones) addon.zoneCount = zoneCount;
+    } else if (addon.type === 'jobs') {
+      if (jobCreditCount !== undefined) addon.jobCreditCount = jobCreditCount;
+    }
+
+    await addon.save();
+
+    res.json({
+      id: addon._id,
+      name: addon.name,
+      type: addon.type,
+      priceINR: addon.priceINR,
+      priceUSD: addon.priceUSD,
+      zoneCount: addon.zoneCount,
+      jobCreditCount: addon.jobCreditCount,
+      unlockAllZones: addon.unlockAllZones
+    });
+  } catch (error) {
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error('Update addon error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.deleteAddon = async (req, res) => {
+  try {
+    const Addon = require('../models/Addon');
+    const SubscriptionAddon = require('../models/SubscriptionAddon');
+    const { addonId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(addonId)) {
+      return res.status(400).json({ error: 'Invalid addon ID' });
+    }
+
+    const purchaseCount = await SubscriptionAddon.countDocuments({ addonId });
+    if (purchaseCount > 0) {
+      return res.status(400).json({
+        error: 'Cannot delete addon that has been purchased',
+        purchaseCount
+      });
+    }
+
+    await Addon.findByIdAndDelete(addonId);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete addon error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 };
