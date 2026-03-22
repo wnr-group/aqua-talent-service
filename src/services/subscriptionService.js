@@ -13,10 +13,7 @@ const toGracePeriodEnd = (endDate) => {
 };
 
 const getFreeTierMaxApplications = async () => {
-  return SystemConfig.getValue(
-    CONFIG_KEYS.FREE_TIER_MAX_APPLICATIONS,
-    DEFAULT_FREE_TIER_MAX_APPLICATIONS
-  );
+  return DEFAULT_FREE_TIER_MAX_APPLICATIONS;
 };
 
 const checkSubscriptionStatus = async (studentId) => {
@@ -88,17 +85,36 @@ const checkSubscriptionStatus = async (studentId) => {
 const getApplicationLimit = async (studentId) => {
   const student = await Student.findById(studentId);
 
-  // Check subscription's maxApplications (works for both free and paid tiers)
   if (student?.currentSubscriptionId) {
     const subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
-      .populate('serviceId', 'maxApplications');
+      .populate('serviceId', 'tier maxApplications');
 
-    if (subscription?.serviceId?.maxApplications) {
-      return subscription.serviceId.maxApplications;
+    if (subscription?.serviceId?.tier === 'free') {
+      return getFreeTierMaxApplications();
+    }
+
+    if (typeof subscription?.serviceId?.maxApplications === 'number') {
+      // Include stacked applications from previous plan
+      const baseLimit = subscription.serviceId.maxApplications;
+      const stackedApps = subscription.stackedApplications || 0;
+
+      // Include additional job credits from addons
+      const { getAdditionalJobCredits } = require('./zonePricingService');
+      const addonCredits = await getAdditionalJobCredits(subscription._id);
+
+      return baseLimit + stackedApps + addonCredits;
+    }
+
+    // maxApplications is null means unlimited
+    if (subscription?.serviceId?.maxApplications === null) {
+      return Infinity;
     }
   }
 
-  // No maxApplications set means unlimited
+  if (student?.subscriptionTier === 'free') {
+    return getFreeTierMaxApplications();
+  }
+
   return Infinity;
 };
 

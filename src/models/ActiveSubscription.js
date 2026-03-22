@@ -19,7 +19,7 @@ const ActiveSubscriptionSchema = new mongoose.Schema({
   },
   endDate: {
     type: Date,
-    required: true
+    default: null
   },
   status: {
     type: String,
@@ -29,6 +29,16 @@ const ActiveSubscriptionSchema = new mongoose.Schema({
   autoRenew: {
     type: Boolean,
     default: false
+  },
+  applicationsUsed: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  stackedApplications: {
+    type: Number,
+    default: 0,
+    min: 0
   },
   createdAt: {
     type: Date,

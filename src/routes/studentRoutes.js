@@ -61,4 +61,11 @@ router.patch('/subscription', requireAuth, requireUserType('student'), subscript
 router.delete('/subscription', requireAuth, requireUserType('student'), subscriptionController.cancelSubscription);
 router.get('/payments', requireAuth, requireUserType('student'), subscriptionController.getPaymentHistory);
 
+// Zone-related endpoints
+router.get('/subscription/zones', requireAuth, requireUserType('student'), studentController.getSubscriptionZones);
+router.get('/zone-addons', requireAuth, requireUserType('student'), studentController.getZoneAddons);
+
+// Job credits addons endpoint
+router.get('/jobs-addons', requireAuth, requireUserType('student'), studentController.getJobsAddons);
+
 module.exports = router;

@@ -48,7 +48,7 @@ const JOB_TYPES = [
   'Project'
 ];
 
-const SUBSCRIPTION_STATUSES = ['active', 'expired', 'cancelled', 'pending'];
+const SUBSCRIPTION_STATUSES = ['active', 'expired', 'cancelled', 'pending', 'exhausted'];
 
 const SUBSCRIPTION_TIERS = ['free', 'paid'];
 
@@ -83,7 +83,8 @@ const CONFIG_KEYS = {
 
 const CURRENCIES = ['USD', 'EUR', 'GBP', 'INR', 'AUD', 'CAD'];
 
-const BILLING_CYCLES = ['monthly', 'quarterly', 'yearly', 'one-time'];
+// All plans are now quota-based (one-time purchase)
+const BILLING_CYCLES = ['one-time'];
 
 module.exports = {
   JOB_STATUSES,
