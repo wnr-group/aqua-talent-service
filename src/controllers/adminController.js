@@ -957,7 +957,8 @@ exports.getStudents = async (req, res) => {
       const escapedSearch = escapeRegex(search);
       matchConditions.$or = [
         { fullName: { $regex: escapedSearch, $options: 'i' } },
-        { email: { $regex: escapedSearch, $options: 'i' } }
+        { email: { $regex: escapedSearch, $options: 'i' } },
+        { studentId: { $regex: escapedSearch, $options: 'i' } }
       ];
     }
 
@@ -1012,6 +1013,7 @@ exports.getStudents = async (req, res) => {
       {
         $project: {
           _id: 1,
+          studentId: 1,
           fullName: 1,
           email: 1,
           subscriptionTier: 1,
@@ -1029,6 +1031,7 @@ exports.getStudents = async (req, res) => {
 
     const result = students.map(s => ({
       id: s._id.toString(),
+      studentId: s.studentId || null,
       fullName: s.fullName,
       email: s.email,
       subscriptionTier: s.subscriptionTier,
@@ -1130,8 +1133,10 @@ exports.getStudentProfile = async (req, res) => {
 
     res.json({
       id: student._id,
+      studentId: student.studentId || null,
       fullName: student.fullName,
       email: student.email,
+      isDGShipping: student.isDGShipping || 'no',
       profileLink: student.profileLink || null,
       bio: student.bio || null,
       location: student.location || null,

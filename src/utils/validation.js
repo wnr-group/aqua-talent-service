@@ -7,38 +7,79 @@ const {
   COMPANY_SIZES
 } = require('../constants');
 
-const companyRegistrationSchema = z.object({
-  companyName: z.string()
-    .min(2)
-    .max(100)
-    .trim(),
+const blockedDomains = [
+  "gmail.com",
+  "yahoo.com",
+  "outlook.com",
+  "hotmail.com",
+  "zoho.com",
+  "icloud.com",
+  "protonmail.com",
+  "aol.com",
+  "mail.com"
+];
 
-  username: z.string()
-    .min(3)
-    .max(30)
-    .regex(/^[a-z0-9_]+$/)
-    .transform(v => v.toLowerCase()),
+const companyRegisterSchema = z
+  .object({
+    companyName: z
+      .string()
+      .min(2, "Company name must be at least 2 characters"),
 
-  email: z.string().email(),
+    username: z
+      .string()
+      .min(3, "Username must be at least 3 characters"),
 
-  password: z.string().min(8)
-});
+    email: z
+      .string()
+      .email("Invalid email address"),
+
+    companyDomain: z
+      .string()
+      .min(3, "Company domain is required")
+      .regex(/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/, "Invalid domain format"),
+
+    password: z
+      .string()
+      .min(8, "Password must be at least 8 characters"),
+
+    confirmPassword: z.string()
+  })
+  .refine((data) => data.password === data.confirmPassword, {
+    message: "Passwords do not match",
+    path: ["confirmPassword"]
+  })
+  .refine((data) => {
+    const emailDomain = data.email.split("@")[1]?.toLowerCase();
+
+    // extra safety: ensure domain exists
+    if (!emailDomain) return false;
+
+    return !blockedDomains.includes(emailDomain);
+  }, {
+    message: "Please use an official company email address",
+    path: ["email"]
+  });
 
 const studentRegistrationSchema = z.object({
   fullName: z.string()
     .min(2)
     .max(100)
     .trim(),
+  studentId: z.string().min(3).max(30),
 
   username: z.string()
     .min(3)
     .max(30)
-    .regex(/^[a-z0-9_]+$/)
+    .regex(/^[a-zA-Z0-9_]+$/)
     .transform(v => v.toLowerCase()),
 
   email: z.string().email(),
 
   password: z.string().min(8),
+  
+  isDGShipping: z.enum(['yes', 'no'], {
+  required_error: 'Please select an option',
+}),
 
   profileLink: z.string()
     .url()
@@ -198,7 +239,7 @@ const resetPasswordSchema = z.object({
 });
 
 module.exports = {
-  companyRegistrationSchema,
+  companyRegisterSchema,
   studentRegistrationSchema,
   createJobSchema,
   createDraftJobSchema,

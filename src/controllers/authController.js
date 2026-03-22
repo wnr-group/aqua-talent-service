@@ -10,7 +10,7 @@ const AvailableService = require('../models/AvailableService');
 const ActiveSubscription = require('../models/ActiveSubscription');
 const PasswordResetToken = require('../models/PasswordResetToken');
 const {
-  companyRegistrationSchema,
+  companyRegisterSchema,
   studentRegistrationSchema,
   forgotPasswordSchema,
   verifyResetTokenSchema,
@@ -179,6 +179,7 @@ exports.login = async (req, res) => {
       id: student._id.toString(),
       fullName: student.fullName,
       email: student.email,
+      isDGShipping: student.isDGShipping,
       profileLink: student.profileLink,
       isHired: student.isHired,
       currentSubscriptionId: student.currentSubscriptionId,
@@ -241,6 +242,7 @@ exports.getMe = async (req, res) => {
          id: student._id.toString(),
          fullName: student.fullName,
          email: student.email,
+         isDGShipping: student.isDGShipping,
          profileLink: student.profileLink,
          isHired: student.isHired,
          currentSubscriptionId: student.currentSubscriptionId,
@@ -257,7 +259,7 @@ exports.getMe = async (req, res) => {
 
 exports.registerCompany = async (req, res) => {
   try {
-    const parsed = companyRegistrationSchema.parse(req.body);
+    const parsed = companyRegisterSchema.parse(req.body);
 
     const { companyName, username, email, password } = parsed;
 
@@ -322,7 +324,7 @@ exports.registerStudent = async (req, res) => {
   try {
     const parsed = studentRegistrationSchema.parse(req.body);
 
-    const { fullName, username, email, password, profileLink } = parsed;
+    const { fullName, username, email, password, profileLink, isDGShipping } = parsed;
 
     const existingUser = await User.findOne({ username });
 
@@ -349,15 +351,19 @@ exports.registerStudent = async (req, res) => {
     // Get or create the free plan
     const freePlan = await AvailableService.getFreePlan();
 
+    const studentId = `STU-${Date.now()}`;
+
     // Create student first (without subscription)
     const student = await Student.create({
-      userId: user._id,
-      fullName,
-      email,
-      profileLink: profileLink || null,
-      isHired: false,
-      subscriptionTier: 'free'
-    });
+  userId: user._id,
+  studentId,
+  fullName,
+  email,
+  isDGShipping: isDGShipping || 'no',
+  profileLink: profileLink || null,
+  isHired: false,
+  subscriptionTier: 'free'
+});
 
     // Create free subscription with student ID
     const freeSubscription = await ActiveSubscription.create({

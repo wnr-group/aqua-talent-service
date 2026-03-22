@@ -166,7 +166,7 @@ exports.getDashboard = async (req, res) => {
 
 exports.getJobs = async (req, res) => {
   try {
-    const { status, search, location, jobType, page = 1, limit = 10 } = req.query;
+    const { status, search, jobType, location, skills, page = 1, limit = 10 } = req.query;
 
     const company = await Company.findOne({ userId: req.user.userId });
 
@@ -779,7 +779,7 @@ exports.getJobApplications = async (req, res) => {
 
 exports.getAllApplications = async (req, res) => {
   try {
-    const { status, search, jobType, location, page = 1, limit = 10 } = req.query;
+    const { status, search, jobType, location, skills, page = 1, limit = 10 } = req.query;
 
     const company = await Company.findOne({ userId: req.user.userId });
 
@@ -833,9 +833,19 @@ exports.getAllApplications = async (req, res) => {
     // Additional match conditions
     const additionalMatch = {};
 
+     
+
     if (jobType) {
       additionalMatch['jobPosting.jobType'] = jobType;
     }
+
+    if (skills) {
+  const skillList = skills.split(',').map((s) => s.trim().toLowerCase());
+
+  additionalMatch['student.skills'] = {
+    $in: skillList
+  };
+}
 
     if (location) {
       const escapedLocation = escapeRegex(location);
