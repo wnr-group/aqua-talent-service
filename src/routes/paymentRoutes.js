@@ -50,6 +50,28 @@ router.post(
   paymentController.verifyZoneAddonPayment
 );
 
+// Job credits addon routes (Extra Job Credits)
+router.post(
+  '/jobs-addon/create-order',
+  requireAuth,
+  requireUserType('student'),
+  paymentController.purchaseJobsAddon
+);
+
+router.post(
+  '/jobs-addon/purchase',
+  requireAuth,
+  requireUserType('student'),
+  paymentController.purchaseJobsAddon
+);
+
+router.post(
+  '/jobs-addon/verify',
+  requireAuth,
+  requireUserType('student'),
+  paymentController.verifyJobsAddonPayment
+);
+
 // Pay-per-job routes - create-order must come before :jobId to avoid matching "create-order" as jobId
 router.post(
   '/pay-per-job/create-order',

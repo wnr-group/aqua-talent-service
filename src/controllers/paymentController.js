@@ -715,12 +715,22 @@ exports.verifyZoneAddonPayment = async (req, res) => {
     });
 
     const SubscriptionAddon = require('../models/SubscriptionAddon');
-    await SubscriptionAddon.create({
-      subscriptionId: student.currentSubscriptionId,
-      addonId,
-      paymentRecordId: paymentRecord._id,
-      quantity: 1
-    });
+    await SubscriptionAddon.findOneAndUpdate(
+      {
+        subscriptionId: student.currentSubscriptionId,
+        addonId
+      },
+      {
+        $inc: { quantity: 1 },
+        $setOnInsert: {
+          subscriptionId: student.currentSubscriptionId,
+          addonId,
+          createdAt: new Date()
+        },
+        $set: { paymentRecordId: paymentRecord._id }
+      },
+      { upsert: true, new: true }
+    );
 
     if (!addon.unlockAllZones && zoneIdsStr !== 'all') {
       const zoneIds = JSON.parse(zoneIdsStr);
@@ -876,7 +886,10 @@ exports.verifyPayPerJob = async (req, res) => {
       currency: purchase.currency,
       paymentDate: new Date(),
       status: 'completed',
+      razorpayOrderId: razorpay_order_id,
+      razorpayPaymentId: razorpay_payment_id,
       transactionId: razorpay_payment_id,
+      paymentGateway: 'razorpay',
       paymentMethod: 'razorpay',
       gatewayResponse: { orderId: razorpay_order_id, type: 'pay_per_job' }
     });
@@ -889,6 +902,125 @@ exports.verifyPayPerJob = async (req, res) => {
     res.json({ success: true, paymentId: razorpay_payment_id });
   } catch (error) {
     console.error('Verify pay per job error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.purchaseJobsAddon = async (req, res) => {
+  try {
+    const { addonId, currency = 'INR' } = req.body;
+
+    const student = await Student.findOne({ userId: req.user.userId });
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    if (!student.currentSubscriptionId) {
+      return res.status(400).json({ error: 'No active subscription' });
+    }
+
+    const Addon = require('../models/Addon');
+    const addon = await Addon.findById(addonId);
+    if (!addon || addon.type !== 'jobs') {
+      return res.status(400).json({ error: 'Invalid job credits addon' });
+    }
+
+    const amount = currency === 'INR' ? addon.priceINR : addon.priceUSD;
+    if (!amount) {
+      return res.status(400).json({ error: 'Addon price not configured for this currency' });
+    }
+
+    const razorpay = getRazorpayInstance();
+    const order = await razorpay.orders.create({
+      amount: Math.round(amount * 100),
+      currency,
+      notes: {
+        type: 'jobs_addon',
+        studentId: student._id.toString(),
+        addonId: addon._id.toString()
+      }
+    });
+
+    res.json({
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      key: process.env.RAZORPAY_KEY_ID,
+      addon: { id: addon._id, name: addon.name, jobCredits: addon.jobCreditCount }
+    });
+  } catch (error) {
+    console.error('Purchase jobs addon error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.verifyJobsAddonPayment = async (req, res) => {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+
+    const generated_signature = crypto
+      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .update(razorpay_order_id + '|' + razorpay_payment_id)
+      .digest('hex');
+
+    if (generated_signature !== razorpay_signature) {
+      return res.status(400).json({ error: 'Invalid payment signature' });
+    }
+
+    const razorpay = getRazorpayInstance();
+    const order = await razorpay.orders.fetch(razorpay_order_id);
+
+    if (order.notes.type !== 'jobs_addon') {
+      return res.status(400).json({ error: 'Invalid order type' });
+    }
+
+    const studentId = order.notes.studentId;
+    const addonId = order.notes.addonId;
+
+    const student = await Student.findById(studentId);
+    const Addon = require('../models/Addon');
+    const addon = await Addon.findById(addonId);
+
+    if (!addon || addon.type !== 'jobs') {
+      return res.status(400).json({ error: 'Invalid addon' });
+    }
+
+    const paymentRecord = await PaymentRecord.create({
+      studentId,
+      serviceId: null,
+      subscriptionId: student.currentSubscriptionId,
+      amount: order.amount / 100,
+      currency: order.currency,
+      paymentDate: new Date(),
+      status: 'completed',
+      razorpayOrderId: razorpay_order_id,
+      razorpayPaymentId: razorpay_payment_id,
+      transactionId: razorpay_payment_id,
+      paymentMethod: 'razorpay',
+      gatewayResponse: { orderId: razorpay_order_id, type: 'jobs_addon' }
+    });
+
+    const SubscriptionAddon = require('../models/SubscriptionAddon');
+    await SubscriptionAddon.findOneAndUpdate(
+      {
+        subscriptionId: student.currentSubscriptionId,
+        addonId
+      },
+      {
+        $inc: { quantity: 1 },
+        $setOnInsert: {
+          subscriptionId: student.currentSubscriptionId,
+          addonId,
+          createdAt: new Date()
+        },
+        $set: { paymentRecordId: paymentRecord._id }
+      },
+      { upsert: true, new: true }
+    );
+
+    res.json({ success: true, paymentId: razorpay_payment_id, jobCreditsAdded: addon.jobCreditCount });
+  } catch (error) {
+    console.error('Verify jobs addon payment error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 };

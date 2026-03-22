@@ -13,7 +13,7 @@ const { getSubscriptionUsage, incrementApplicationCount, decrementApplicationCou
 const { uploadStudentResume } = require('../services/mediaService');
 const emailService = require('../services/emailService');
 const notificationService = require('../services/notificationService');
-const { canAccessJob, getUnlockOptions } = require('../services/zoneAccessService');
+const { canAccessJob, getUnlockOptions, getQuotaUnlockOptions } = require('../services/zoneAccessService');
 
 // Check if email is taken by another user (excluding current student)
 const isEmailTakenByOther = async (email, currentStudentId) => {
@@ -387,11 +387,13 @@ exports.getJobs = async (req, res) => {
           }).distinct('jobPostingId');
           const paidJobIdSet = new Set(paidJobIds.map(id => id.toString()));
 
-          // Batch fetch: get all job IDs this student has applied to
-          const appliedJobIds = await Application.find({
+          // Batch fetch: get all applications with status for this student
+          const applications = await Application.find({
             studentId: student._id
-          }).distinct('jobPostingId');
-          const appliedJobIdSet = new Set(appliedJobIds.map(id => id.toString()));
+          }).select('jobPostingId status').lean();
+          const applicationMap = new Map(
+            applications.map(app => [app.jobPostingId.toString(), app.status])
+          );
 
           // Batch fetch: all zones for zoneLockReason
           const allZones = await Zone.find().select('name').lean();
@@ -400,26 +402,27 @@ exports.getJobs = async (req, res) => {
           // Check each job against cached data (no additional queries)
           jobsWithZoneStatus = transformedJobs.map(job => {
             const jobIdStr = job.id.toString();
-            const hasApplied = appliedJobIdSet.has(jobIdStr);
+            const applicationStatus = applicationMap.get(jobIdStr) || null;
+            const hasApplied = applicationStatus !== null;
 
             // If already applied, not locked (they already have access)
             if (hasApplied) {
-              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'applied', hasApplied: true };
+              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'applied', hasApplied: true, applicationStatus };
             }
 
             // If pay-per-job purchased, not locked
             if (paidJobIdSet.has(jobIdStr)) {
-              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'pay-per-job', hasApplied: false };
+              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'pay-per-job', hasApplied: false, applicationStatus: null };
             }
 
             // If job has no countryId/zoneId, not locked
             if (!job.zoneId) {
-              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'no-zone-restriction', hasApplied: false };
+              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'no-zone-restriction', hasApplied: false, applicationStatus: null };
             }
 
             // If student has all zones access, not locked
             if (accessibleZones.allZones) {
-              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'all-zones', hasApplied: false };
+              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'all-zones', hasApplied: false, applicationStatus: null };
             }
 
             // Check if job's zone is in student's accessible zones
@@ -429,7 +432,7 @@ exports.getJobs = async (req, res) => {
             );
 
             if (hasAccess) {
-              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'subscription', hasApplied: false };
+              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'subscription', hasApplied: false, applicationStatus: null };
             }
 
             // Locked - include zone info
@@ -441,7 +444,8 @@ exports.getJobs = async (req, res) => {
                 zoneName: zoneMap.get(jobZoneId) || 'Unknown Zone'
               },
               accessSource: null,
-              hasApplied: false
+              hasApplied: false,
+              applicationStatus: null
             };
           });
         }
@@ -478,41 +482,61 @@ exports.getJob = async (req, res) => {
     let applicationStatus = null;
     let student = null;
     let isDescriptionLocked = false;
+    let applicationsUsed = 0;
+    let applicationLimit = null;
 
     // Check if student has applied to this job
     if (req.user && req.user.userType === 'student') {
       student = await Student.findOne({ userId: req.user.userId });
       if (student) {
-        const [application, planDetails, usage] = await Promise.all([
+        const [application, totalApplicationLimit, usage] = await Promise.all([
           Application.findOne({
             studentId: student._id,
             jobPostingId: jobId
           }),
-          getCurrentPlanDetails(student),
+          getApplicationLimit(student._id),
           getSubscriptionUsage(student._id)
         ]);
 
-        const applicationsUsed = usage.applicationsUsed;
-        const isLimitReached = typeof planDetails.currentPlanLimit === 'number' && applicationsUsed >= planDetails.currentPlanLimit;
-
-        if (isLimitReached) {
-          isDescriptionLocked = true;
-        }
+        applicationsUsed = usage.applicationsUsed;
+        // Use getApplicationLimit which includes base + stacked + addon credits
+        applicationLimit = totalApplicationLimit === Infinity ? null : totalApplicationLimit;
+        const isLimitReached = typeof applicationLimit === 'number' && applicationsUsed >= applicationLimit;
 
         if (application) {
           hasApplied = true;
           applicationStatus = application.status;
         }
+
+        // Only lock description if quota is exhausted AND student hasn't applied
+        // Students who have already applied should always see the job details
+        if (isLimitReached && !hasApplied) {
+          isDescriptionLocked = true;
+        }
       }
     }
 
-    // Zone access check (after quota check)
-    // Skip zone check if already applied - they already have access to this job
+    // Zone access check - always run (even when quota exhausted) to show unlock options
     let isZoneLocked = false;
     let zoneLockReason = null;
     let accessSource = null; // 'subscription' | 'pay-per-job' | 'all-zones' | 'applied' | null
+    let quotaLockReason = null;
 
-    if (student && !isDescriptionLocked) {
+    // Get quota unlock options when quota is exhausted
+    if (student && isDescriptionLocked) {
+      try {
+        const quotaUnlockOptions = await getQuotaUnlockOptions(student._id);
+        quotaLockReason = {
+          applicationsUsed,
+          applicationLimit,
+          unlockOptions: quotaUnlockOptions
+        };
+      } catch (quotaError) {
+        console.error('Quota unlock options failed:', quotaError);
+      }
+    }
+
+    if (student) {
       if (hasApplied) {
         // Already applied - they have access
         accessSource = 'applied';
@@ -597,6 +621,8 @@ exports.getJob = async (req, res) => {
         foundedYear: jobObj.companyId.foundedYear
       } : null,
       isDescriptionLocked: isLocked,
+      isQuotaExhausted: isDescriptionLocked,
+      quotaLockReason,
       isZoneLocked,
       zoneLockReason,
       accessSource,
@@ -629,18 +655,22 @@ exports.applyToJob = async (req, res) => {
       });
     }
 
-    const [planDetails, usage] = await Promise.all([
-      getCurrentPlanDetails(student),
+    const [totalApplicationLimit, usage] = await Promise.all([
+      getApplicationLimit(student._id),
       getSubscriptionUsage(student._id)
     ]);
     const applicationsUsed = usage.applicationsUsed;
-    const isLimitReached = typeof planDetails.currentPlanLimit === 'number' && applicationsUsed >= planDetails.currentPlanLimit;
+    const applicationLimit = totalApplicationLimit === Infinity ? null : totalApplicationLimit;
+    const isLimitReached = typeof applicationLimit === 'number' && applicationsUsed >= applicationLimit;
 
     if (isLimitReached) {
+      const quotaUnlockOptions = await getQuotaUnlockOptions(student._id);
       return res.status(403).json({
         error: 'Application limit reached. Please upgrade your plan to apply to more jobs.',
+        isQuotaExhausted: true,
         applicationsUsed,
-        applicationLimit: planDetails.currentPlanLimit
+        applicationLimit,
+        unlockOptions: quotaUnlockOptions
       });
     }
 
@@ -1193,6 +1223,29 @@ exports.getZoneAddons = async (req, res) => {
     res.json({ addons: formattedAddons });
   } catch (error) {
     console.error('Get zone addons error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+exports.getJobsAddons = async (req, res) => {
+  try {
+    const Addon = require('../models/Addon');
+    const addons = await Addon.find({ type: 'jobs' })
+      .select('name priceINR priceUSD jobCreditCount')
+      .sort({ priceINR: 1 })
+      .lean();
+
+    const formattedAddons = addons.map(a => ({
+      id: a._id,
+      name: a.name,
+      priceINR: a.priceINR,
+      priceUSD: a.priceUSD,
+      jobCredits: a.jobCreditCount
+    }));
+
+    res.json({ addons: formattedAddons });
+  } catch (error) {
+    console.error('Get jobs addons error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 };

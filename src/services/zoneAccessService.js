@@ -225,8 +225,75 @@ const getUnlockOptions = async (zoneId, studentId = null) => {
   return options;
 };
 
+const getQuotaUnlockOptions = async (studentId = null) => {
+  const options = [];
+
+  // Job credit addons (Extra Job Credits)
+  const jobAddons = await Addon.find({ type: 'jobs' })
+    .select('name priceINR priceUSD jobCreditCount')
+    .sort({ jobCreditCount: 1 })
+    .lean();
+
+  for (const addon of jobAddons) {
+    options.push({
+      type: 'jobs-addon',
+      addonId: addon._id,
+      label: addon.name,
+      description: `Add ${addon.jobCreditCount} extra job application${addon.jobCreditCount > 1 ? 's' : ''}`,
+      priceINR: addon.priceINR,
+      priceUSD: addon.priceUSD,
+      jobCredits: addon.jobCreditCount
+    });
+  }
+
+  // Upgrade plan option - find a plan with more applications
+  const AvailableService = require('../models/AvailableService');
+
+  let currentPlanMaxApps = 0;
+  let currentPlanId = null;
+
+  if (studentId) {
+    const student = await Student.findById(studentId);
+    if (student?.currentSubscriptionId) {
+      const subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
+        .populate('serviceId', 'maxApplications');
+      if (subscription?.serviceId) {
+        currentPlanId = subscription.serviceId._id;
+        currentPlanMaxApps = subscription.serviceId.maxApplications || 0;
+      }
+    }
+  }
+
+  // Find plans with more applications or unlimited
+  const upgradePlans = await AvailableService.find({
+    isActive: true,
+    tier: 'paid',
+    _id: { $ne: currentPlanId },
+    $or: [
+      { maxApplications: null }, // Unlimited
+      { maxApplications: { $gt: currentPlanMaxApps } }
+    ]
+  }).select('_id name maxApplications').sort({ maxApplications: 1 }).lean();
+
+  if (upgradePlans.length > 0) {
+    const upgradePlan = upgradePlans[0];
+    options.push({
+      type: 'upgrade-plan',
+      label: `Upgrade to ${upgradePlan.name}`,
+      description: upgradePlan.maxApplications === null
+        ? 'Unlimited job applications'
+        : `Up to ${upgradePlan.maxApplications} job applications`,
+      planId: upgradePlan._id,
+      url: '/pricing'
+    });
+  }
+
+  return options;
+};
+
 module.exports = {
   getAccessibleZones,
   canAccessJob,
-  getUnlockOptions
+  getUnlockOptions,
+  getQuotaUnlockOptions
 };

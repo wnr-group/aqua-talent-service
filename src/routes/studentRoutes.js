@@ -65,4 +65,7 @@ router.get('/payments', requireAuth, requireUserType('student'), subscriptionCon
 router.get('/subscription/zones', requireAuth, requireUserType('student'), studentController.getSubscriptionZones);
 router.get('/zone-addons', requireAuth, requireUserType('student'), studentController.getZoneAddons);
 
+// Job credits addons endpoint
+router.get('/jobs-addons', requireAuth, requireUserType('student'), studentController.getJobsAddons);
+
 module.exports = router;
