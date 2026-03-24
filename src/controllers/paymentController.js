@@ -977,7 +977,22 @@ exports.verifyJobsAddonPayment = async (req, res) => {
     const studentId = order.notes.studentId;
     const addonId = order.notes.addonId;
 
+    // Re-fetch the student to get the CURRENT subscriptionId at the time of
+    // verification — the order was created earlier and the student may have
+    // upgraded their plan in between (Bug 5: stale subscriptionId mismatch).
     const student = await Student.findById(studentId);
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    if (!student.currentSubscriptionId) {
+      console.error('[verifyJobsAddonPayment] No active subscription — cannot attach addon', {
+        studentId,
+        razorpay_order_id
+      });
+      return res.status(400).json({ error: 'No active subscription found. Cannot apply extra credits.' });
+    }
+
     const Addon = require('../models/Addon');
     const addon = await Addon.findById(addonId);
 
@@ -1001,7 +1016,7 @@ exports.verifyJobsAddonPayment = async (req, res) => {
     });
 
     const SubscriptionAddon = require('../models/SubscriptionAddon');
-    await SubscriptionAddon.findOneAndUpdate(
+    const updatedAddon = await SubscriptionAddon.findOneAndUpdate(
       {
         subscriptionId: student.currentSubscriptionId,
         addonId
@@ -1017,6 +1032,24 @@ exports.verifyJobsAddonPayment = async (req, res) => {
       },
       { upsert: true, new: true }
     );
+
+    // Bug 4: If the upsert returned nothing the DB write silently failed — surface it.
+    if (!updatedAddon) {
+      console.error('[verifyJobsAddonPayment] CRITICAL — SubscriptionAddon upsert returned null', {
+        studentId,
+        subscriptionId: student.currentSubscriptionId?.toString(),
+        addonId,
+        razorpay_payment_id
+      });
+      return res.status(500).json({ error: 'Failed to update job credits in database. Please contact support.' });
+    }
+
+    console.log('[verifyJobsAddonPayment]', {
+      studentId,
+      subscriptionId: student.currentSubscriptionId?.toString(),
+      addonCredits: addon.jobCreditCount,
+      newQuantity: updatedAddon.quantity
+    });
 
     res.json({ success: true, paymentId: razorpay_payment_id, jobCreditsAdded: addon.jobCreditCount });
   } catch (error) {
