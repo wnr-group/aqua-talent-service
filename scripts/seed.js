@@ -68,7 +68,7 @@ const seedDatabase = async () => {
       maxApplications: null, // Unlimited
       price: 499,
       currency: 'INR',
-      billingCycle: 'monthly',
+      billingCycle: 'one-time',
       trialDays: 7,
       features: [
         'Unlimited applications',
@@ -93,7 +93,7 @@ const seedDatabase = async () => {
       maxApplications: null,
       price: 4999,
       currency: 'INR',
-      billingCycle: 'yearly',
+      billingCycle: 'one-time',
       discount: 17, // ~2 months free
       features: [
         'Unlimited applications',
@@ -207,6 +207,7 @@ const seedDatabase = async () => {
     // Create student first
     const student = await Student.create({
       userId: studentUser._id,
+      studentId: 'STU001', 
       fullName: 'Rahul Sharma',
       email: 'rahul.sharma@gmail.com',
       profileLink: 'https://linkedin.com/in/rahulsharma',
@@ -299,6 +300,7 @@ const seedDatabase = async () => {
         status: 'approved',
         approvedAt: new Date()
       },
+      
       {
         companyId: company3._id,
         title: 'Backend Developer',
