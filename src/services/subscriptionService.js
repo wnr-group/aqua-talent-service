@@ -90,7 +90,12 @@ const getApplicationLimit = async (studentId) => {
       .populate('serviceId', 'tier maxApplications');
 
     if (subscription?.serviceId?.tier === 'free') {
-      return getFreeTierMaxApplications();
+      // Include any purchased job-addon credits even on the free-tier plan so that
+      // students who bought extra credits while on a free plan are not silently blocked.
+      const { getAdditionalJobCredits } = require('./zonePricingService');
+      const addonCredits = await getAdditionalJobCredits(subscription._id);
+      const freeMax = await getFreeTierMaxApplications();
+      return freeMax + addonCredits;
     }
 
     if (typeof subscription?.serviceId?.maxApplications === 'number') {

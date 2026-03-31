@@ -660,8 +660,28 @@ exports.applyToJob = async (req, res) => {
       getApplicationLimit(student._id),
       getSubscriptionUsage(student._id)
     ]);
-    const applicationsUsed = usage.applicationsUsed;
     const applicationLimit = totalApplicationLimit === Infinity ? null : totalApplicationLimit;
+
+    // Determine the authoritative applicationsUsed value:
+    //   • Free-tier (with or without a subscription document): count raw Application
+    //     documents because the subscription counter is never incremented for free users.
+    //   • Paid-tier: use the subscription's applicationsUsed counter, which is the source
+    //     of truth and correctly excludes withdrawn applications.
+    let applicationsUsed;
+    if (student.subscriptionTier === 'free') {
+      applicationsUsed = await Application.countDocuments({ studentId: student._id });
+    } else {
+      applicationsUsed = usage.applicationsUsed;
+    }
+
+    // [MANDATORY LOG] — matches spec format
+    console.log('[applyToJob]', {
+      studentId: student._id,
+      applicationsUsed,
+      applicationLimit,
+      currentSubscriptionId: student.currentSubscriptionId
+    });
+
     const isLimitReached = typeof applicationLimit === 'number' && applicationsUsed >= applicationLimit;
 
     if (isLimitReached) {

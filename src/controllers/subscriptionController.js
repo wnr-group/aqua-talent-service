@@ -219,7 +219,14 @@ const createOrUpgradeSubscriptionForStudent = async ({
       const used = currentSubscription.applicationsUsed || 0;
 
       if (currentMax !== null) {
-        remainingApplications = Math.max(0, currentMax - used);
+        // Include unused addon credits in the carry-over so they are not lost on upgrade.
+        // Previously this used only currentMax (base limit), causing addon credits to be
+        // silently discarded when the student upgraded or renewed their plan.
+        const { getAdditionalJobCredits } = require('../services/zonePricingService');
+        const addonCredits = await getAdditionalJobCredits(currentSubscription._id);
+        const oldStackedApps = currentSubscription.stackedApplications || 0;
+        const effectiveMax = currentMax + oldStackedApps + addonCredits;
+        remainingApplications = Math.max(0, effectiveMax - used);
       }
       // If currentMax is null (unlimited), we don't carry over anything special
 
@@ -329,7 +336,9 @@ const createOrUpgradeSubscriptionForStudent = async ({
 
     if (previousAddons.length > 0) {
       const Addon = require('../models/Addon');
-      // Only preserve zone addons, not job addons (job credits are already counted in remaining)
+      // Preserve zone addons. Job addon credits are already rolled up into
+      // remainingApplications (and therefore stackedApplications) in the calculation above,
+      // so job addon records do not need to be migrated to the new subscription.
       const zoneAddonIds = await Addon.find({ type: 'zone' }).distinct('_id');
       const zoneAddonIdStrings = zoneAddonIds.map(id => id.toString());
 
