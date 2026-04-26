@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 
+const User = require('../models/User');
 const Company = require('../models/Company');
 const JobPosting = require('../models/JobPosting');
 const Student = require('../models/Student');
@@ -168,6 +169,7 @@ exports.getCompanies = async (req, res) => {
         $project: {
           _id: 1,
           username: '$user.username',
+          isActive: '$user.isActive',
           name: 1,
           email: 1,
           status: 1,
@@ -186,6 +188,7 @@ exports.getCompanies = async (req, res) => {
     const result = companies.map(c => ({
       id: c._id.toString(),
       username: c.username,
+      isActive: c.isActive !== false,
       name: c.name,
       email: c.email,
       status: c.status,
@@ -683,13 +686,16 @@ exports.getCompanyProfileAdmin = async (req, res) => {
   try {
     const { companyId } = req.params;
 
-    const company = await Company.findById(companyId);
+    const company = await Company.findById(companyId).populate('userId', 'isActive');
 
     if (!company) {
       return res.status(404).json({ message: 'Company not found' });
     }
 
-    return res.json(company);
+    const companyObj = company.toObject();
+    companyObj.isActive = company.userId?.isActive !== false;
+
+    return res.json(companyObj);
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
@@ -966,6 +972,17 @@ exports.getStudents = async (req, res) => {
       pipeline.push({ $match: matchConditions });
     }
 
+    // Lookup user to get isActive
+    pipeline.push({
+      $lookup: {
+        from: 'users',
+        localField: 'userId',
+        foreignField: '_id',
+        as: 'user'
+      }
+    });
+    pipeline.push({ $unwind: { path: '$user', preserveNullAndEmpty: true } });
+
     // Lookup applications to count active ones
     pipeline.push({
       $lookup: {
@@ -1018,6 +1035,7 @@ exports.getStudents = async (req, res) => {
           email: 1,
           subscriptionTier: 1,
           isHired: 1,
+          isActive: '$user.isActive',
           hasResume: { $cond: [{ $ne: ['$resumeUrl', null] }, true, false] },
           hasVideo: { $cond: [{ $ne: ['$introVideoUrl', null] }, true, false] },
           totalApplications: 1,
@@ -1036,6 +1054,7 @@ exports.getStudents = async (req, res) => {
       email: s.email,
       subscriptionTier: s.subscriptionTier,
       isHired: s.isHired,
+      isActive: s.isActive !== false,
       hasResume: s.hasResume,
       hasVideo: s.hasVideo,
       totalApplications: s.totalApplications,
@@ -1067,6 +1086,7 @@ exports.getStudentProfile = async (req, res) => {
     }
 
     const student = await Student.findById(studentId)
+      .populate('userId', 'isActive')
       .populate({
         path: 'currentSubscriptionId',
         populate: {
@@ -1136,6 +1156,7 @@ exports.getStudentProfile = async (req, res) => {
       studentId: student.studentId || null,
       fullName: student.fullName,
       email: student.email,
+      isActive: student.userId?.isActive !== false,
       isDGShipping: student.isDGShipping || 'no',
       profileLink: student.profileLink || null,
       bio: student.bio || null,
@@ -2187,5 +2208,33 @@ exports.deleteAddon = async (req, res) => {
   } catch (error) {
     console.error('Delete addon error:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// ─── Account Lifecycle ────────────────────────────────────────────────────────
+
+exports.setStudentActiveStatus = async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { isActive } = req.body;
+    const student = await Student.findById(studentId);
+    if (!student) return res.status(404).json({ success: false, message: 'Student not found' });
+    await User.findByIdAndUpdate(student.userId, { isActive });
+    res.json({ success: true, isActive });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.setCompanyActiveStatus = async (req, res) => {
+  try {
+    const { companyId } = req.params;
+    const { isActive } = req.body;
+    const company = await Company.findById(companyId);
+    if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
+    await User.findByIdAndUpdate(company.userId, { isActive });
+    res.json({ success: true, isActive });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 };
