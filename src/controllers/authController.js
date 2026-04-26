@@ -122,9 +122,16 @@ exports.login = async (req, res) => {
 
     // password check
     const isMatch = await bcrypt.compare(password, user.passwordHash);
-    
+
     if (!isMatch) {
       return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    if (!user.isActive) {
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been suspended. Please contact support@aquatalentz.com.'
+      });
     }
 
     let company = null;

@@ -24,6 +24,10 @@ router.patch('/applications/:appId', adminController.updateApplication);
 router.get('/students', adminController.getStudents);
 router.get('/students/:studentId', adminController.getStudentProfile);
 router.patch('/students/:studentId/subscription', adminController.assignStudentSubscription);
+router.patch('/students/:studentId/status', adminController.setStudentActiveStatus);
+
+// Company status toggle
+router.patch('/companies/:companyId/status', adminController.setCompanyActiveStatus);
 
 // Subscription plan management
 router.get('/subscription-plans', adminController.getSubscriptionPlans);
