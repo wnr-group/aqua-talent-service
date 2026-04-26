@@ -981,7 +981,7 @@ exports.getStudents = async (req, res) => {
         as: 'user'
       }
     });
-    pipeline.push({ $unwind: { path: '$user', preserveNullAndEmpty: true } });
+    pipeline.push({ $unwind: { path: '$user', preserveNullAndEmptyArrays: true } });
 
     // Lookup applications to count active ones
     pipeline.push({
