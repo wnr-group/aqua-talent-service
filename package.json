@@ -9,6 +9,7 @@
     "start": "node src/server.js",
     "seed": "node scripts/seed.js",
     "seed:pricing": "node scripts/seed-pricing-and-zones.js",
+    "reset": "node scripts/reset.js",
     "migrate:remove-company-spotlight": "node scripts/remove-company-spotlight.js"
   },
   "keywords": [],
