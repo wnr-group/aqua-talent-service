@@ -1,9 +1,5 @@
 require('dotenv').config();
 
-if (process.env.NODE_ENV === 'production') {
-  console.error('❌  reset.js cannot run in production.');
-  process.exit(1);
-}
 
 const bcrypt = require('bcrypt');
 const connectDB = require('../src/db');
