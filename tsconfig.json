@@ -9,7 +9,7 @@
     "skipLibCheck": true,
     "strict": true,
     "forceConsistentCasingInFileNames": true,
-    "sourceMap": true,
+    "sourceMap": false,
     "noEmitOnError": true
   },
   "include": ["src/**/*.ts", "scripts/**/*.ts"],
