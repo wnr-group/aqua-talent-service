@@ -10,7 +10,9 @@
     "seed": "node scripts/seed.js",
     "seed:pricing": "node scripts/seed-pricing-and-zones.js",
     "reset": "node scripts/reset.js",
-    "migrate:remove-company-spotlight": "node scripts/remove-company-spotlight.js"
+    "migrate:remove-company-spotlight": "node scripts/remove-company-spotlight.js",
+    "typecheck": "tsc --noEmit",
+    "supabase:types": "supabase gen types typescript --linked --schema public > src/lib/supabase/database.types.ts"
   },
   "keywords": [],
   "author": "",
@@ -19,6 +21,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.991.0",
     "@aws-sdk/s3-request-presigner": "^3.993.0",
+    "@supabase/supabase-js": "^2.116.0",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "dayjs": "^1.11.19",
@@ -34,6 +37,8 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "nodemon": "^3.1.11"
+    "@types/node": "^26.6.2",
+    "nodemon": "^3.1.11",
+    "typescript": "^7.0.2"
   }
 }

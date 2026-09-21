@@ -14,6 +14,21 @@ logs
 dist/
 build/
 
+# TypeScript build output co-located with .ts sources.
+# src/lib is TS-only (no hand-written .js lives there), so this scoped
+# pattern is safe - it won't touch the legacy CommonJS controllers/services.
+src/lib/**/*.js
+src/lib/**/*.js.map
+src/lib/**/*.d.ts
+src/lib/**/*.d.ts.map
+
+# Same for the Supabase migration scripts (TS-only folder).
+scripts/supabase-migration/**/*.js
+scripts/supabase-migration/**/*.js.map
+
+# Mongo backups contain real user data - never commit them.
+backups/
+
 # Debugging
 .vscode/
 .idea/
