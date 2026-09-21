@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const mongoose = require('mongoose');
+const { getSupabaseClient } = require('./lib/supabase/client');
 
 const app = express();
 const authRoutes = require('./routes/authRoutes');
@@ -72,16 +72,23 @@ import('./routes/testMailRoutes.mjs')
   });
 
 // Health check
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
+  let database = 'disconnected';
+
+  try {
+    const supabase = getSupabaseClient();
+    const { error } = await supabase.from('users').select('id', { count: 'exact', head: true });
+    database = error ? 'disconnected' : 'connected';
+  } catch {
+    database = 'disconnected';
+  }
+
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    database:
-      mongoose.connection.readyState === 1
-        ? 'connected'
-        : 'disconnected',
-    databaseName: mongoose.connection.name,   
-    databaseHost: mongoose.connection.host  
+    database,
+    databaseName: 'postgres',
+    databaseHost: process.env.SUPABASE_URL ? new URL(process.env.SUPABASE_URL).host : null
   });
 });
 
