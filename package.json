@@ -9,8 +9,13 @@
     "start": "node src/server.js",
     "seed": "node scripts/seed.js",
     "seed:pricing": "node scripts/seed-pricing-and-zones.js",
+    "seed:zones": "node scripts/seed-zones.js",
     "reset": "node scripts/reset.js",
     "migrate:remove-company-spotlight": "node scripts/remove-company-spotlight.js",
+    "migrate:zone-pricing-model": "node scripts/migrate-zone-pricing-model.js",
+    "migrate:billing-cycle": "node scripts/migrate-billing-cycle-to-one-time.js",
+    "migrate:subscription-zones": "node scripts/migrate-subscription-zones.js",
+    "build": "tsc",
     "typecheck": "tsc --noEmit",
     "supabase:types": "supabase gen types typescript --linked --schema public > src/lib/supabase/database.types.ts"
   },

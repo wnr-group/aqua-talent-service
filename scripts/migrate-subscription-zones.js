@@ -1,64 +1,51 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
 /**
- * Migration script to populate SubscriptionZone for existing subscriptions.
- * Run with: node scripts/migrate-subscription-zones.js
+ * Backfill script: populate subscription_zones for active subscriptions that
+ * don't have any yet (e.g. ones created before zone tracking existed).
+ * Run with: npx tsc && node scripts/migrate-subscription-zones.js
  */
-
-const mongoose = require('mongoose');
-require('dotenv').config();
-
-async function migrate() {
-  await mongoose.connect(process.env.MONGODB_URI);
-  console.log('Connected to MongoDB');
-
-  const ActiveSubscription = require('../src/models/ActiveSubscription');
-  const PlanZone = require('../src/models/PlanZone');
-  const SubscriptionZone = require('../src/models/SubscriptionZone');
-
-  const subscriptions = await ActiveSubscription.find({ status: 'active' })
-    .populate('serviceId', 'allZonesIncluded');
-
-  console.log(`Found ${subscriptions.length} active subscriptions`);
-
-  let migrated = 0;
-  let skipped = 0;
-
-  for (const sub of subscriptions) {
-    if (sub.serviceId?.allZonesIncluded) {
-      skipped++;
-      continue;
+const path_1 = __importDefault(require("path"));
+const dotenv_1 = __importDefault(require("dotenv"));
+dotenv_1.default.config({ path: path_1.default.resolve(__dirname, '../.env') });
+const client_1 = require("../src/lib/supabase/client");
+const zonePricingService_1 = require("../src/services/zonePricingService");
+const migrate = async () => {
+    const supabase = (0, client_1.getSupabaseClient)();
+    const { data: subscriptions, error } = await supabase
+        .from('active_subscriptions')
+        .select('id, service_id')
+        .eq('status', 'active');
+    if (error)
+        throw error;
+    console.log(`Found ${subscriptions?.length ?? 0} active subscriptions`);
+    let migrated = 0;
+    let skipped = 0;
+    for (const sub of subscriptions || []) {
+        const { count: existingZones } = await supabase
+            .from('subscription_zones')
+            .select('*', { count: 'exact', head: true })
+            .eq('subscription_id', sub.id);
+        if ((existingZones ?? 0) > 0) {
+            skipped++;
+            continue;
+        }
+        const created = await (0, zonePricingService_1.ensureSubscriptionZonesForPlan)({ subscriptionId: sub.id, serviceId: sub.service_id });
+        if (created > 0) {
+            migrated++;
+            console.log(`Migrated subscription ${sub.id}: ${created} zones`);
+        }
+        else {
+            skipped++;
+        }
     }
-
-    const planZones = await PlanZone.find({ planId: sub.serviceId._id });
-
-    if (planZones.length === 0) {
-      skipped++;
-      continue;
-    }
-
-    for (const pz of planZones) {
-      await SubscriptionZone.findOneAndUpdate(
-        { subscriptionId: sub._id, zoneId: pz.zoneId },
-        {
-          $setOnInsert: {
-            subscriptionId: sub._id,
-            zoneId: pz.zoneId,
-            source: 'plan',
-            createdAt: new Date()
-          }
-        },
-        { upsert: true }
-      );
-    }
-
-    migrated++;
-    console.log(`Migrated subscription ${sub._id}: ${planZones.length} zones`);
-  }
-
-  console.log(`\nMigration complete: ${migrated} migrated, ${skipped} skipped`);
-  await mongoose.disconnect();
-}
-
-migrate().catch(err => {
-  console.error('Migration failed:', err);
-  process.exit(1);
+    console.log(`\nMigration complete: ${migrated} migrated, ${skipped} skipped`);
+};
+migrate().catch((err) => {
+    console.error('Migration failed:', err);
+    process.exit(1);
 });
+//# sourceMappingURL=migrate-subscription-zones.js.map
