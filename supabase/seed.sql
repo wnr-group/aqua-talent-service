@@ -1,14 +1,17 @@
 -- ============================================================================
 -- Supabase seed data for aqua-talent-service.
 --
--- Consolidates every ad-hoc seed dataset that used to live in scripts/seed.ts,
--- scripts/seed-pricing-and-zones.ts and scripts/reset.ts into one idempotent
--- SQL file - the standard Supabase CLI convention (runs after
--- supabase/migrations/ on `supabase db reset`, or can be applied to a remote
--- project with `psql "$DATABASE_URL" -f supabase/seed.sql`).
+-- This is the single source of demo/seed data for the project - the old
+-- ad-hoc Node scripts (seed.ts, seed-pricing-and-zones.ts, seed-zones.ts,
+-- reset.ts) have been removed in favor of this one file, the standard
+-- Supabase CLI convention (runs after supabase/migrations/ on
+-- `supabase db reset` locally, or via `npm run seed` /
+-- `supabase db query --linked -f supabase/seed.sql` /
+-- `psql "$DATABASE_URL" -f supabase/seed.sql` against a remote project).
 --
--- Idempotent: every insert uses a fixed literal id and `on conflict (id) do
--- nothing`, so re-running this file is a no-op once the rows already exist.
+-- Idempotent: every insert uses a fixed literal id (or, for
+-- available_services, its unique name) and `on conflict ... do nothing`, so
+-- re-running this file is a no-op once the rows already exist.
 -- Passwords are hashed with pgcrypto's crypt()/gen_salt('bf') - this is real
 -- bcrypt (blowfish), so bcrypt.compare() in the Node app verifies it exactly
 -- like a hash produced by the bcrypt npm package.
