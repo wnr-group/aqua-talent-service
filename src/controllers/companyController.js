@@ -1,1298 +1,936 @@
-const mongoose = require('mongoose');
-const dayjs = require('dayjs');
-const utc = require('dayjs/plugin/utc');
-const timezone = require('dayjs/plugin/timezone');
-
-dayjs.extend(utc);
-dayjs.extend(timezone);
-
-const Company = require('../models/Company');
-const JobPosting = require('../models/JobPosting');
-const Application = require('../models/Application');
-const Student = require('../models/Student');
-const ZoneCountry = require('../models/ZoneCountry');
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const dayjs_1 = __importDefault(require("dayjs"));
+const utc_1 = __importDefault(require("dayjs/plugin/utc"));
+const timezone_1 = __importDefault(require("dayjs/plugin/timezone"));
+dayjs_1.default.extend(utc_1.default);
+dayjs_1.default.extend(timezone_1.default);
+const client_1 = require("../lib/supabase/client");
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { createJobSchema, createDraftJobSchema, updateJobSchema, companyProfileSchema } = require('../utils/validation');
-const { JOB_STATUSES, JOB_TYPES, APPLICATION_STATUSES } = require('../constants');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { JOB_STATUSES, JOB_TYPES } = require('../constants');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { uploadCompanyLogo, getPresignedUrl } = require('../services/mediaService');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const emailService = require('../services/emailService');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const notificationService = require('../services/notificationService');
-const {
-  applyCompanyProfileUpdates,
-  buildCompanyProfileResponse,
-  buildPublicCompanyProfile,
-  getCachedPublicCompanyProfile,
-  setCachedPublicCompanyProfile,
-  invalidatePublicCompanyProfileCache
-} = require('../services/companyProfileService');
-
-const COMPANY_REVERIFICATION_FIELDS = ['name', 'email', 'website', 'industry', 'size', 'foundedYear'];
-
+const companyProfileService_1 = require("../services/companyProfileService");
+const supabase = (0, client_1.getSupabaseClient)();
+const COMPANY_REVERIFICATION_FIELDS = ['name', 'email', 'website', 'industry', 'size', 'founded_year'];
+const VISIBLE_APPLICATION_STATUSES = ['reviewed', 'interview_scheduled', 'offer_extended', 'hired', 'rejected'];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isValidUuid = (value) => typeof value === 'string' && UUID_RE.test(value);
+// Escapes Postgres ILIKE special characters (%, _, \) - equivalent to the old escapeRegex helper.
+const escapeLike = (value) => value.replace(/[\\%_]/g, (c) => `\\${c}`);
 // Check if email is taken by another user (excluding current company)
 const isEmailTakenByOther = async (email, currentCompanyId) => {
-  const normalizedEmail = email.toLowerCase().trim();
-
-  // Check students
-  const studentExists = await Student.exists({ email: normalizedEmail });
-  if (studentExists) return true;
-
-  // Check other companies
-  const otherCompany = await Company.exists({
-    email: normalizedEmail,
-    _id: { $ne: currentCompanyId }
-  });
-  if (otherCompany) return true;
-
-  // Check admin email
-  if (process.env.ADMIN_EMAIL?.toLowerCase() === normalizedEmail) return true;
-
-  return false;
+    const normalizedEmail = email.toLowerCase().trim();
+    const { data: student } = await supabase.from('students').select('id').eq('email', normalizedEmail).maybeSingle();
+    if (student)
+        return true;
+    const { data: otherCompany } = await supabase
+        .from('companies')
+        .select('id')
+        .eq('email', normalizedEmail)
+        .neq('id', currentCompanyId)
+        .maybeSingle();
+    if (otherCompany)
+        return true;
+    if (process.env.ADMIN_EMAIL?.toLowerCase() === normalizedEmail)
+        return true;
+    return false;
 };
-
-const VISIBLE_APPLICATION_STATUSES = ['reviewed', 'interview_scheduled', 'offer_extended', 'hired', 'rejected'];
-
-const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
 const hasExplicitTimezoneInfo = (value) => /(?:z|[+-]\d{2}:?\d{2})$/i.test(String(value || '').trim());
-
 const isValidIanaTimezone = (value) => {
-  if (typeof value !== 'string' || !value.trim()) {
-    return false;
-  }
-
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: value.trim() });
-    return true;
-  } catch (error) {
-    return false;
-  }
+    if (typeof value !== 'string' || !value.trim()) {
+        return false;
+    }
+    try {
+        new Intl.DateTimeFormat('en-US', { timeZone: value.trim() });
+        return true;
+    }
+    catch {
+        return false;
+    }
 };
-
 const convertInterviewDateToUtc = ({ interviewDateInput, interviewTimeZone }) => {
-  if (interviewDateInput === undefined || interviewDateInput === null || interviewDateInput === '') {
-    return { utcDate: null, error: null };
-  }
-
-  if (typeof interviewDateInput !== 'string') {
-    return { utcDate: null, error: 'interviewDate must be a string' };
-  }
-
-  const rawInterviewDate = interviewDateInput.trim();
-  if (!rawInterviewDate) {
-    return { utcDate: null, error: 'interviewDate must be a valid date-time value' };
-  }
-
-  let parsedDate;
-
-  if (hasExplicitTimezoneInfo(rawInterviewDate)) {
-    parsedDate = dayjs(rawInterviewDate);
-  } else {
-    if (!interviewTimeZone) {
-      return { utcDate: null, error: 'interviewTimeZone is required when interviewDate has no timezone offset' };
+    if (interviewDateInput === undefined || interviewDateInput === null || interviewDateInput === '') {
+        return { utcDate: null, error: null };
     }
-
-    if (!isValidIanaTimezone(interviewTimeZone)) {
-      return { utcDate: null, error: 'interviewTimeZone must be a valid IANA timezone (e.g. Asia/Kolkata)' };
+    if (typeof interviewDateInput !== 'string') {
+        return { utcDate: null, error: 'interviewDate must be a string' };
     }
-
-    parsedDate = dayjs.tz(rawInterviewDate, interviewTimeZone.trim());
-  }
-
-  if (!parsedDate.isValid()) {
-    return { utcDate: null, error: 'interviewDate must be a valid date-time value' };
-  }
-
-  const utcIso = parsedDate.utc().toISOString();
-  return { utcDate: new Date(utcIso), error: null };
+    const rawInterviewDate = interviewDateInput.trim();
+    if (!rawInterviewDate) {
+        return { utcDate: null, error: 'interviewDate must be a valid date-time value' };
+    }
+    let parsedDate;
+    if (hasExplicitTimezoneInfo(rawInterviewDate)) {
+        parsedDate = (0, dayjs_1.default)(rawInterviewDate);
+    }
+    else {
+        if (!interviewTimeZone) {
+            return { utcDate: null, error: 'interviewTimeZone is required when interviewDate has no timezone offset' };
+        }
+        if (!isValidIanaTimezone(interviewTimeZone)) {
+            return { utcDate: null, error: 'interviewTimeZone must be a valid IANA timezone (e.g. Asia/Kolkata)' };
+        }
+        parsedDate = dayjs_1.default.tz(rawInterviewDate, interviewTimeZone.trim());
+    }
+    if (!parsedDate.isValid()) {
+        return { utcDate: null, error: 'interviewDate must be a valid date-time value' };
+    }
+    return { utcDate: new Date(parsedDate.utc().toISOString()), error: null };
 };
-
+const getCompanyForUser = async (userId) => {
+    const { data: company } = await supabase.from('companies').select('*').eq('user_id', userId).maybeSingle();
+    return company;
+};
 exports.getDashboard = async (req, res) => {
-  try {
-    const company = await Company.findOne({ userId: req.user.userId });
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
+    try {
+        const company = await getCompanyForUser(req.user.userId);
+        if (!company) {
+            return res.status(404).json({ error: 'Company not found' });
+        }
+        const { data: jobs } = await supabase.from('job_postings').select('id, status').eq('company_id', company.id);
+        const jobList = jobs || [];
+        const jobIds = jobList.map((j) => j.id);
+        const jobStats = {
+            totalJobs: jobList.length,
+            activeJobs: jobList.filter((j) => j.status === 'approved').length,
+            pendingJobs: jobList.filter((j) => j.status === 'pending').length,
+            draftJobs: jobList.filter((j) => j.status === 'draft').length,
+            unpublishedJobs: jobList.filter((j) => j.status === 'unpublished').length
+        };
+        let appStats = { totalApplications: 0, reviewedApplications: 0 };
+        if (jobIds.length) {
+            const { data: apps } = await supabase
+                .from('applications')
+                .select('status')
+                .in('job_posting_id', jobIds)
+                .in('status', VISIBLE_APPLICATION_STATUSES)
+                .not('reviewed_at', 'is', null);
+            const appList = apps || [];
+            appStats = {
+                totalApplications: appList.length,
+                reviewedApplications: appList.filter((a) => a.status === 'reviewed').length
+            };
+        }
+        res.json({ ...jobStats, ...appStats });
     }
-
-    // Job stats using aggregation
-    const jobStats = await JobPosting.aggregate([
-      { $match: { companyId: company._id } },
-      {
-        $group: {
-          _id: null,
-          totalJobs: { $sum: 1 },
-          activeJobs: { $sum: { $cond: [{ $eq: ['$status', 'approved'] }, 1, 0] } },
-          pendingJobs: { $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] } },
-          draftJobs: { $sum: { $cond: [{ $eq: ['$status', 'draft'] }, 1, 0] } },
-          unpublishedJobs: { $sum: { $cond: [{ $eq: ['$status', 'unpublished'] }, 1, 0] } }
-        }
-      }
-    ]);
-
-    // Get job IDs for application count
-    const jobIds = await JobPosting.find({ companyId: company._id }).distinct('_id');
-
-    // Application stats - only count applications visible to company (admin-approved)
-    const appStats = await Application.aggregate([
-      {
-        $match: {
-          jobPostingId: { $in: jobIds },
-          status: { $in: VISIBLE_APPLICATION_STATUSES },
-          reviewedAt: { $ne: null }
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          totalApplications: { $sum: 1 },
-          reviewedApplications: { $sum: { $cond: [{ $eq: ['$status', 'reviewed'] }, 1, 0] } }
-        }
-      }
-    ]);
-
-    res.json({
-      totalJobs: jobStats[0]?.totalJobs || 0,
-      activeJobs: jobStats[0]?.activeJobs || 0,
-      pendingJobs: jobStats[0]?.pendingJobs || 0,
-      draftJobs: jobStats[0]?.draftJobs || 0,
-      unpublishedJobs: jobStats[0]?.unpublishedJobs || 0,
-      totalApplications: appStats[0]?.totalApplications || 0,
-      reviewedApplications: appStats[0]?.reviewedApplications || 0
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
 };
-
 exports.getJobs = async (req, res) => {
-  try {
-    const { status, search, jobType, location, skills, page = 1, limit = 10 } = req.query;
-
-    const company = await Company.findOne({ userId: req.user.userId });
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
+    try {
+        const { status, search, jobType, location, page = 1, limit = 10 } = req.query;
+        const company = await getCompanyForUser(req.user.userId);
+        if (!company) {
+            return res.status(404).json({ error: 'Company not found' });
+        }
+        if (status && !JOB_STATUSES.includes(status)) {
+            return res.status(400).json({ error: `Status must be one of: ${JOB_STATUSES.join(', ')}` });
+        }
+        if (jobType && !JOB_TYPES.includes(jobType)) {
+            return res.status(400).json({ error: `Job type must be one of: ${JOB_TYPES.join(', ')}` });
+        }
+        const pageNum = Math.max(1, parseInt(page) || 1);
+        const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 10));
+        const from = (pageNum - 1) * limitNum;
+        const to = from + limitNum - 1;
+        let query = supabase.from('job_postings').select('*', { count: 'exact' }).eq('company_id', company.id);
+        if (status)
+            query = query.eq('status', status);
+        if (jobType)
+            query = query.eq('job_type', jobType);
+        if (location)
+            query = query.ilike('location', `%${escapeLike(location)}%`);
+        if (search) {
+            const escaped = escapeLike(search);
+            query = query.or(`title.ilike.%${escaped}%,description.ilike.%${escaped}%`);
+        }
+        const { data: jobs, count, error } = await query.order('created_at', { ascending: false }).range(from, to);
+        if (error)
+            throw error;
+        res.json({
+            jobs: jobs || [],
+            pagination: {
+                page: pageNum,
+                limit: limitNum,
+                total: count ?? 0,
+                totalPages: Math.ceil((count ?? 0) / limitNum)
+            }
+        });
     }
-
-    if (status && !JOB_STATUSES.includes(status)) {
-      return res.status(400).json({ error: `Status must be one of: ${JOB_STATUSES.join(', ')}` });
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
     }
-
-    if (jobType && !JOB_TYPES.includes(jobType)) {
-      return res.status(400).json({ error: `Job type must be one of: ${JOB_TYPES.join(', ')}` });
-    }
-
-    const query = { companyId: company._id };
-
-    if (status) {
-      query.status = status;
-    }
-
-    if (search) {
-      const escapedSearch = escapeRegex(search);
-      query.$or = [
-        { title: { $regex: escapedSearch, $options: 'i' } },
-        { description: { $regex: escapedSearch, $options: 'i' } }
-      ];
-    }
-
-    if (location) {
-      const escapedLocation = escapeRegex(location);
-      query.location = { $regex: escapedLocation, $options: 'i' };
-    }
-
-    if (jobType) {
-      query.jobType = jobType;
-    }
-
-    const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 10));
-    const skip = (pageNum - 1) * limitNum;
-
-    const [jobs, total] = await Promise.all([
-      JobPosting.find(query)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limitNum),
-      JobPosting.countDocuments(query)
-    ]);
-
-    res.json({
-      jobs,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        totalPages: Math.ceil(total / limitNum)
-      }
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
 };
-
 exports.createJob = async (req, res) => {
-  try {
-    const body = req.body || {};
-    const requestedStatus = body.status === 'draft' ? 'draft' : 'pending';
-
-    // Use relaxed validation for drafts, strict for pending
-    const parsed = requestedStatus === 'draft'
-      ? createDraftJobSchema.parse(body)
-      : createJobSchema.parse(body);
-
-    const company = await Company.findOne({ userId: req.user.userId });
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
+    try {
+        const body = req.body || {};
+        const requestedStatus = body.status === 'draft' ? 'draft' : 'pending';
+        const parsed = requestedStatus === 'draft' ? createDraftJobSchema.parse(body) : createJobSchema.parse(body);
+        const company = await getCompanyForUser(req.user.userId);
+        if (!company) {
+            return res.status(404).json({ error: 'Company not found' });
+        }
+        const title = parsed.title || null;
+        const description = parsed.description || null;
+        const requirements = Array.isArray(parsed.requirements)
+            ? (parsed.requirements.length > 0 ? parsed.requirements.join(', ') : null)
+            : (parsed.requirements || null);
+        const location = parsed.location || null;
+        const jobType = parsed.jobType || null;
+        const salaryRange = parsed.salaryRange || null;
+        const deadline = parsed.deadline ? new Date(parsed.deadline).toISOString() : null;
+        const countryId = parsed.countryId || null;
+        if (countryId) {
+            if (!isValidUuid(countryId)) {
+                return res.status(400).json({ error: 'Invalid country ID format' });
+            }
+            const { data: country } = await supabase.from('zone_countries').select('id').eq('id', countryId).maybeSingle();
+            if (!country) {
+                return res.status(400).json({ error: 'Country not found' });
+            }
+        }
+        const { data: job, error } = await supabase
+            .from('job_postings')
+            .insert({
+            company_id: company.id,
+            title,
+            description,
+            requirements,
+            location,
+            job_type: jobType,
+            salary_range: salaryRange,
+            deadline,
+            country_id: countryId || null,
+            status: requestedStatus
+        })
+            .select()
+            .single();
+        if (error || !job)
+            throw error || new Error('Failed to create job');
+        res.status(201).json(job);
+        if (job.status === 'pending') {
+            notificationService
+                .notifyAdminsNewJobPending({ jobId: job.id, companyName: company.name })
+                .catch((error) => console.error('Admin notification error (new job pending):', error));
+        }
     }
-
-    // Safely handle all optional fields — default to null when missing
-    const title = parsed.title || null;
-    const description = parsed.description || null;
-    const requirements = Array.isArray(parsed.requirements)
-      ? (parsed.requirements.length > 0 ? parsed.requirements.join(', ') : null)
-      : (parsed.requirements || null);
-    const location = parsed.location || null;
-    const jobType = parsed.jobType || null;
-    const salaryRange = parsed.salaryRange || null;
-    const deadline = parsed.deadline ? new Date(parsed.deadline) : null;
-    const countryId = parsed.countryId || null;
-
-    // Validate countryId if provided
-    if (countryId) {
-      if (!mongoose.Types.ObjectId.isValid(countryId)) {
-        return res.status(400).json({ error: 'Invalid country ID format' });
-      }
-      const country = await ZoneCountry.findById(countryId);
-      if (!country) {
-        return res.status(400).json({ error: 'Country not found' });
-      }
+    catch (error) {
+        if (error.name === 'ZodError') {
+            return res.status(400).json({ error: error.issues[0].message });
+        }
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
     }
-
-    // Safe access for any uploaded files
-    const file = req.files?.[0] || null;
-
-    const job = await JobPosting.create({
-      companyId: company._id,
-      title,
-      description,
-      requirements,
-      location,
-      jobType,
-      salaryRange,
-      deadline,
-      countryId: countryId || null,
-      status: requestedStatus
-    });
-
-    res.status(201).json(job);
-
-    if (job.status === 'pending') {
-      notificationService
-        .notifyAdminsNewJobPending({ jobId: job._id, companyName: company.name })
-        .catch((error) => {
-          console.error('Admin notification error (new job pending):', error);
-        });
-    }
-  } catch (error) {
-    if (error.name === 'ZodError') {
-      return res.status(400).json({ error: error.issues[0].message });
-    }
-
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
 };
-
 exports.getJob = async (req, res) => {
-  try {
-    const { jobId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(jobId)) {
-      return res.status(400).json({ error: 'Invalid job ID format' });
+    try {
+        const { jobId } = req.params;
+        if (!isValidUuid(jobId)) {
+            return res.status(400).json({ error: 'Invalid job ID format' });
+        }
+        const company = await getCompanyForUser(req.user.userId);
+        if (!company) {
+            return res.status(404).json({ error: 'Company not found' });
+        }
+        const { data: job } = await supabase.from('job_postings').select('*').eq('id', jobId).maybeSingle();
+        if (!job) {
+            return res.status(404).json({ error: 'Job not found' });
+        }
+        if (job.company_id !== company.id) {
+            return res.status(403).json({ error: 'You can only view your own job postings' });
+        }
+        res.json(job);
     }
-
-    const company = await Company.findOne({ userId: req.user.userId });
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
     }
-
-    const job = await JobPosting.findById(jobId);
-
-    if (!job) {
-      return res.status(404).json({ error: 'Job not found' });
-    }
-
-    if (!job.companyId.equals(company._id)) {
-      return res.status(403).json({ error: 'You can only view your own job postings' });
-    }
-
-    res.json(job);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
 };
-
 exports.updateJob = async (req, res) => {
-  try {
-    const { jobId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(jobId)) {
-      return res.status(400).json({ error: 'Invalid job ID format' });
-    }
-
-    const company = await Company.findOne({ userId: req.user.userId });
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
-    }
-
-    const job = await JobPosting.findById(jobId);
-
-    if (!job) {
-      return res.status(404).json({ error: 'Job not found' });
-    }
-
-    if (!job.companyId.equals(company._id)) {
-      return res.status(403).json({ error: 'You can only edit your own job postings' });
-    }
-
-    // Handle close request — company can close approved/unpublished/pending jobs
-    if (req.body.status === 'closed') {
-      if (job.status === 'closed') {
-        return res.status(400).json({ error: 'Job is already closed' });
-      }
-      if (job.status === 'draft') {
-        return res.status(400).json({ error: 'Draft jobs cannot be closed' });
-      }
-
-      const updatedJob = await JobPosting.findByIdAndUpdate(
-        jobId,
-        { $set: { status: 'closed' } },
-        { returnDocument: 'after' }
-      );
-
-      // Reject all pending/reviewed applications for this job
-      await Application.updateMany(
-        {
-          jobPostingId: jobId,
-          status: { $in: ['pending', 'reviewed'] }
-        },
-        {
-          $set: {
-            status: 'rejected',
-            rejectionReason: 'Job posting has been closed'
-          }
+    try {
+        const { jobId } = req.params;
+        if (!isValidUuid(jobId)) {
+            return res.status(400).json({ error: 'Invalid job ID format' });
         }
-      );
-
-      return res.json(updatedJob);
-    }
-
-    // Handle unpublish request via generic update endpoint
-    if (req.body.status === 'unpublished') {
-      if (job.status !== 'approved') {
-        return res.status(400).json({ error: 'Only approved jobs can be unpublished' });
-      }
-
-      const updatedJob = await JobPosting.findByIdAndUpdate(
-        jobId,
-        { $set: { status: 'unpublished' } },
-        { returnDocument: 'after' }
-      );
-
-      return res.json(updatedJob);
-    }
-
-    // Handle republish request via generic update endpoint
-    if ((req.body.status === 'approved' || req.body.status === 'pending') && job.status === 'unpublished') {
-      const updatedJob = await JobPosting.findByIdAndUpdate(
-        jobId,
-        {
-          $set: {
-            status: 'approved',
-            approvedAt: new Date()
-          }
-        },
-        { returnDocument: 'after' }
-      );
-
-      return res.json(updatedJob);
-    }
-
-    if (job.status !== 'pending' && job.status !== 'draft') {
-      return res.status(403).json({ error: 'Can only edit jobs that are in draft or pending approval' });
-    }
-
-    // Determine if the company wants to submit a draft for review
-    const wantsToSubmit = req.body.status === 'pending' && job.status === 'draft';
-
-    // Use strict validation when submitting for review, relaxed for draft edits
-    const parsed = wantsToSubmit
-      ? updateJobSchema.parse(req.body)
-      : (job.status === 'draft' ? createDraftJobSchema.partial().parse(req.body) : updateJobSchema.parse(req.body));
-
-    // Build update fields
-    const updateFields = {};
-    if (parsed.title !== undefined) updateFields.title = parsed.title;
-    if (parsed.description !== undefined) updateFields.description = parsed.description;
-    if (parsed.requirements !== undefined) updateFields.requirements = parsed.requirements;
-    if (parsed.location !== undefined) updateFields.location = parsed.location;
-    if (parsed.jobType !== undefined) updateFields.jobType = parsed.jobType;
-    if (parsed.salaryRange !== undefined) updateFields.salaryRange = parsed.salaryRange;
-    if (parsed.deadline !== undefined) updateFields.deadline = parsed.deadline ? new Date(parsed.deadline) : null;
-
-    // Handle countryId update
-    if (parsed.countryId !== undefined) {
-      if (parsed.countryId === null) {
-        updateFields.countryId = null;
-      } else {
-        if (!mongoose.Types.ObjectId.isValid(parsed.countryId)) {
-          return res.status(400).json({ error: 'Invalid country ID format' });
+        const company = await getCompanyForUser(req.user.userId);
+        if (!company) {
+            return res.status(404).json({ error: 'Company not found' });
         }
-        const country = await ZoneCountry.findById(parsed.countryId);
-        if (!country) {
-          return res.status(400).json({ error: 'Country not found' });
+        const { data: job } = await supabase.from('job_postings').select('*').eq('id', jobId).maybeSingle();
+        if (!job) {
+            return res.status(404).json({ error: 'Job not found' });
         }
-        updateFields.countryId = parsed.countryId;
-      }
+        if (job.company_id !== company.id) {
+            return res.status(403).json({ error: 'You can only edit your own job postings' });
+        }
+        // Handle close request
+        if (req.body.status === 'closed') {
+            if (job.status === 'closed')
+                return res.status(400).json({ error: 'Job is already closed' });
+            if (job.status === 'draft')
+                return res.status(400).json({ error: 'Draft jobs cannot be closed' });
+            const { data: updatedJob } = await supabase.from('job_postings').update({ status: 'closed' }).eq('id', jobId).select().single();
+            await supabase
+                .from('applications')
+                .update({ status: 'rejected', rejection_reason: 'Job posting has been closed' })
+                .eq('job_posting_id', jobId)
+                .in('status', ['pending', 'reviewed']);
+            return res.json(updatedJob);
+        }
+        // Handle unpublish request
+        if (req.body.status === 'unpublished') {
+            if (job.status !== 'approved') {
+                return res.status(400).json({ error: 'Only approved jobs can be unpublished' });
+            }
+            const { data: updatedJob } = await supabase.from('job_postings').update({ status: 'unpublished' }).eq('id', jobId).select().single();
+            return res.json(updatedJob);
+        }
+        // Handle republish request
+        if ((req.body.status === 'approved' || req.body.status === 'pending') && job.status === 'unpublished') {
+            const { data: updatedJob } = await supabase
+                .from('job_postings')
+                .update({ status: 'approved', approved_at: new Date().toISOString() })
+                .eq('id', jobId)
+                .select()
+                .single();
+            return res.json(updatedJob);
+        }
+        if (job.status !== 'pending' && job.status !== 'draft') {
+            return res.status(403).json({ error: 'Can only edit jobs that are in draft or pending approval' });
+        }
+        const wantsToSubmit = req.body.status === 'pending' && job.status === 'draft';
+        const parsed = wantsToSubmit
+            ? updateJobSchema.parse(req.body)
+            : (job.status === 'draft' ? createDraftJobSchema.partial().parse(req.body) : updateJobSchema.parse(req.body));
+        const updateFields = {};
+        if (parsed.title !== undefined)
+            updateFields.title = parsed.title;
+        if (parsed.description !== undefined)
+            updateFields.description = parsed.description;
+        if (parsed.requirements !== undefined)
+            updateFields.requirements = parsed.requirements;
+        if (parsed.location !== undefined)
+            updateFields.location = parsed.location;
+        if (parsed.jobType !== undefined)
+            updateFields.job_type = parsed.jobType;
+        if (parsed.salaryRange !== undefined)
+            updateFields.salary_range = parsed.salaryRange;
+        if (parsed.deadline !== undefined)
+            updateFields.deadline = parsed.deadline ? new Date(parsed.deadline).toISOString() : null;
+        if (parsed.countryId !== undefined) {
+            if (parsed.countryId === null) {
+                updateFields.country_id = null;
+            }
+            else {
+                if (!isValidUuid(parsed.countryId)) {
+                    return res.status(400).json({ error: 'Invalid country ID format' });
+                }
+                const { data: country } = await supabase.from('zone_countries').select('id').eq('id', parsed.countryId).maybeSingle();
+                if (!country) {
+                    return res.status(400).json({ error: 'Country not found' });
+                }
+                updateFields.country_id = parsed.countryId;
+            }
+        }
+        if (wantsToSubmit) {
+            const merged = {
+                title: updateFields.title ?? job.title,
+                description: updateFields.description ?? job.description,
+                requirements: updateFields.requirements ?? job.requirements,
+                location: updateFields.location ?? job.location,
+                jobType: updateFields.job_type ?? job.job_type,
+                salaryRange: updateFields.salary_range ?? job.salary_range,
+                deadline: updateFields.deadline ?? job.deadline
+            };
+            if (!merged.title || merged.title.length < 5) {
+                return res.status(400).json({ error: 'Title must be at least 5 characters to submit for review' });
+            }
+            if (!merged.description || merged.description.length < 50) {
+                return res.status(400).json({ error: 'Description must be at least 50 characters to submit for review' });
+            }
+            if (!merged.requirements) {
+                return res.status(400).json({ error: 'Requirements are required to submit for review' });
+            }
+            if (!merged.location || merged.location.length < 2) {
+                return res.status(400).json({ error: 'Location is required to submit for review' });
+            }
+            if (!merged.jobType) {
+                return res.status(400).json({ error: 'Job type is required to submit for review' });
+            }
+            if (!merged.salaryRange) {
+                return res.status(400).json({ error: 'Salary range is required to submit for review' });
+            }
+            if (!merged.deadline) {
+                return res.status(400).json({ error: 'Application deadline is required to submit for review' });
+            }
+            if (new Date(merged.deadline) <= new Date()) {
+                return res.status(400).json({ error: 'Deadline must be in the future' });
+            }
+            updateFields.status = 'pending';
+        }
+        const { data: updatedJob, error } = await supabase.from('job_postings').update(updateFields).eq('id', jobId).select().single();
+        if (error)
+            throw error;
+        res.json(updatedJob);
+        if (wantsToSubmit && updatedJob.status === 'pending') {
+            notificationService
+                .notifyAdminsNewJobPending({ jobId: updatedJob.id, companyName: company.name })
+                .catch((error) => console.error('Admin notification error (draft submitted for review):', error));
+        }
     }
-
-    // If submitting a draft, validate that required fields are present (either in update or existing doc)
-    if (wantsToSubmit) {
-      const merged = {
-        title: updateFields.title ?? job.title,
-        description: updateFields.description ?? job.description,
-        requirements: updateFields.requirements ?? job.requirements,
-        location: updateFields.location ?? job.location,
-        jobType: updateFields.jobType ?? job.jobType,
-        salaryRange: updateFields.salaryRange ?? job.salaryRange,
-        deadline: updateFields.deadline ?? job.deadline
-      };
-
-      if (!merged.title || merged.title.length < 5) {
-        return res.status(400).json({ error: 'Title must be at least 5 characters to submit for review' });
-      }
-      if (!merged.description || merged.description.length < 50) {
-        return res.status(400).json({ error: 'Description must be at least 50 characters to submit for review' });
-      }
-      if (!merged.requirements) {
-        return res.status(400).json({ error: 'Requirements are required to submit for review' });
-      }
-      if (!merged.location || merged.location.length < 2) {
-        return res.status(400).json({ error: 'Location is required to submit for review' });
-      }
-      if (!merged.jobType) {
-        return res.status(400).json({ error: 'Job type is required to submit for review' });
-      }
-      if (!merged.salaryRange) {
-        return res.status(400).json({ error: 'Salary range is required to submit for review' });
-      }
-      if (!merged.deadline) {
-        return res.status(400).json({ error: 'Application deadline is required to submit for review' });
-      }
-      if (new Date(merged.deadline) <= new Date()) {
-        return res.status(400).json({ error: 'Deadline must be in the future' });
-      }
-
-      updateFields.status = 'pending';
+    catch (error) {
+        if (error.name === 'ZodError') {
+            return res.status(400).json({ error: error.issues[0].message });
+        }
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
     }
-
-    const updatedJob = await JobPosting.findByIdAndUpdate(
-      jobId,
-      { $set: updateFields },
-      { returnDocument: 'after', runValidators: true }
-    );
-
-    res.json(updatedJob);
-
-    if (wantsToSubmit && updatedJob.status === 'pending') {
-      notificationService
-        .notifyAdminsNewJobPending({ jobId: updatedJob._id, companyName: company.name })
-        .catch((error) => {
-          console.error('Admin notification error (draft submitted for review):', error);
-        });
-    }
-  } catch (error) {
-    if (error.name === 'ZodError') {
-      return res.status(400).json({ error: error.issues[0].message });
-    }
-
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
 };
-
 exports.unpublishJob = async (req, res) => {
-  try {
-    const { jobId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(jobId)) {
-      return res.status(400).json({ error: 'Invalid job ID format' });
-    }
-
-    const company = await Company.findOne({ userId: req.user.userId });
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
-    }
-
-    const job = await JobPosting.findById(jobId);
-
-    if (!job) {
-      return res.status(404).json({ error: 'Job not found' });
-    }
-
-    if (!job.companyId.equals(company._id)) {
-      return res.status(403).json({ error: 'You can only manage your own job postings' });
-    }
-
-    if (job.status !== 'approved') {
-      return res.status(400).json({ error: 'Only approved jobs can be unpublished' });
-    }
-
-    const updatedJob = await JobPosting.findByIdAndUpdate(
-      jobId,
-      { $set: { status: 'unpublished' } },
-      { returnDocument: 'after' }
-    );
-
-    res.json(updatedJob);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.republishJob = async (req, res) => {
-  try {
-    const { jobId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(jobId)) {
-      return res.status(400).json({ error: 'Invalid job ID format' });
-    }
-
-    const company = await Company.findOne({ userId: req.user.userId });
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
-    }
-
-    const job = await JobPosting.findById(jobId);
-
-    if (!job) {
-      return res.status(404).json({ error: 'Job not found' });
-    }
-
-    if (!job.companyId.equals(company._id)) {
-      return res.status(403).json({ error: 'You can only manage your own job postings' });
-    }
-
-    if (job.status !== 'unpublished') {
-      return res.status(400).json({ error: 'Only unpublished jobs can be republished' });
-    }
-
-    const updatedJob = await JobPosting.findByIdAndUpdate(
-      jobId,
-      {
-        $set: {
-          status: 'approved',
-          approvedAt: new Date()
-        }
-      },
-      { returnDocument: 'after' }
-    );
-
-    res.json(updatedJob);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.closeJob = async (req, res) => {
-  try {
-    const { jobId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(jobId)) {
-      return res.status(400).json({ error: 'Invalid job ID format' });
-    }
-
-    const company = await Company.findOne({ userId: req.user.userId });
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
-    }
-
-    const job = await JobPosting.findById(jobId);
-
-    if (!job) {
-      return res.status(404).json({ error: 'Job not found' });
-    }
-
-    if (!job.companyId.equals(company._id)) {
-      return res.status(403).json({ error: 'You can only manage your own job postings' });
-    }
-
-    if (job.status === 'closed') {
-      return res.status(400).json({ error: 'Job is already closed' });
-    }
-
-    if (job.status === 'draft') {
-      return res.status(400).json({ error: 'Draft jobs cannot be closed. Delete them instead.' });
-    }
-
-    // Close the job
-    const updatedJob = await JobPosting.findByIdAndUpdate(
-      jobId,
-      { $set: { status: 'closed' } },
-      { returnDocument: 'after' }
-    );
-
-    // Reject all pending/reviewed applications for this job
-    await Application.updateMany(
-      {
-        jobPostingId: jobId,
-        status: { $in: ['pending', 'reviewed'] }
-      },
-      {
-        $set: {
-          status: 'rejected',
-          rejectionReason: 'Job posting has been closed'
-        }
-      }
-    );
-
-    res.json(updatedJob);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.getJobApplications = async (req, res) => {
-  try {
-    const { jobId } = req.params;
-    const { status, search, page = 1, limit = 10 } = req.query;
-
-    if (!mongoose.Types.ObjectId.isValid(jobId)) {
-      return res.status(400).json({ error: 'Invalid job ID format' });
-    }
-
-    const company = await Company.findOne({ userId: req.user.userId });
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
-    }
-
-    const job = await JobPosting.findById(jobId);
-
-    if (!job) {
-      return res.status(404).json({ error: 'Job not found' });
-    }
-
-    if (!job.companyId.equals(company._id)) {
-      return res.status(403).json({ error: 'You can only view applications for your own jobs' });
-    }
-
-    if (status && !VISIBLE_APPLICATION_STATUSES.includes(status)) {
-      return res.status(400).json({ error: 'Status must be reviewed, interview_scheduled, offer_extended, hired, or rejected' });
-    }
-
-    const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 10));
-    const skip = (pageNum - 1) * limitNum;
-
-    // Build aggregation pipeline for search on student fields
-    const pipeline = [
-      {
-        $match: {
-          jobPostingId: job._id,
-          status: status ? status : { $in: VISIBLE_APPLICATION_STATUSES },
-          reviewedAt: { $ne: null }
-        }
-      },
-      {
-        $lookup: {
-          from: 'students',
-          localField: 'studentId',
-          foreignField: '_id',
-          as: 'student'
-        }
-      },
-      { $unwind: '$student' },
-      {
-        $lookup: {
-          from: 'jobpostings',
-          localField: 'jobPostingId',
-          foreignField: '_id',
-          as: 'jobPosting'
-        }
-      },
-      { $unwind: '$jobPosting' }
-    ];
-
-    if (search) {
-      const escapedSearch = escapeRegex(search);
-      pipeline.push({
-        $match: {
-          $or: [
-            { 'student.fullName': { $regex: escapedSearch, $options: 'i' } },
-            { 'student.email': { $regex: escapedSearch, $options: 'i' } }
-          ]
-        }
-      });
-    }
-
-    // Count total
-    const countPipeline = [...pipeline, { $count: 'total' }];
-    const countResult = await Application.aggregate(countPipeline);
-    const total = countResult[0]?.total || 0;
-
-    // Add sorting and pagination
-    pipeline.push(
-      { $sort: { createdAt: -1 } },
-      { $skip: skip },
-      { $limit: limitNum }
-    );
-
-    const applications = await Application.aggregate(pipeline);
-
-    res.json({
-      applications,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        totalPages: Math.ceil(total / limitNum)
-      }
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.getAllApplications = async (req, res) => {
-  try {
-    const { status, search, jobType, location, skills, page = 1, limit = 10 } = req.query;
-
-    const company = await Company.findOne({ userId: req.user.userId });
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
-    }
-
-    if (status && !VISIBLE_APPLICATION_STATUSES.includes(status)) {
-      return res.status(400).json({ error: 'Status must be reviewed, interview_scheduled, offer_extended, hired, or rejected' });
-    }
-
-    if (jobType && !JOB_TYPES.includes(jobType)) {
-      return res.status(400).json({ error: `Job type must be one of: ${JOB_TYPES.join(', ')}` });
-    }
-
-    const jobIds = await JobPosting.find({ companyId: company._id }).distinct('_id');
-
-    const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 10));
-    const skip = (pageNum - 1) * limitNum;
-
-    // Build aggregation pipeline
-    const pipeline = [
-      {
-        $match: {
-          jobPostingId: { $in: jobIds },
-          status: status ? status : { $in: VISIBLE_APPLICATION_STATUSES },
-          reviewedAt: { $ne: null }
-        }
-      },
-      {
-        $lookup: {
-          from: 'students',
-          localField: 'studentId',
-          foreignField: '_id',
-          as: 'student'
-        }
-      },
-      { $unwind: '$student' },
-      {
-        $lookup: {
-          from: 'jobpostings',
-          localField: 'jobPostingId',
-          foreignField: '_id',
-          as: 'jobPosting'
-        }
-      },
-      { $unwind: '$jobPosting' }
-    ];
-
-    // Additional match conditions
-    const additionalMatch = {};
-
-     
-
-    if (jobType) {
-      additionalMatch['jobPosting.jobType'] = jobType;
-    }
-
-    if (skills) {
-  const skillList = skills.split(',').map((s) => s.trim().toLowerCase());
-
-  additionalMatch['student.skills'] = {
-    $in: skillList
-  };
-}
-
-    if (location) {
-      const escapedLocation = escapeRegex(location);
-      additionalMatch['jobPosting.location'] = { $regex: escapedLocation, $options: 'i' };
-    }
-
-    if (search) {
-      const escapedSearch = escapeRegex(search);
-      additionalMatch.$or = [
-        { 'student.fullName': { $regex: escapedSearch, $options: 'i' } },
-        { 'student.email': { $regex: escapedSearch, $options: 'i' } },
-        { 'jobPosting.title': { $regex: escapedSearch, $options: 'i' } }
-      ];
-    }
-
-    if (Object.keys(additionalMatch).length > 0) {
-      pipeline.push({ $match: additionalMatch });
-    }
-
-    // Count total
-    const countPipeline = [...pipeline, { $count: 'total' }];
-    const countResult = await Application.aggregate(countPipeline);
-    const total = countResult[0]?.total || 0;
-
-    // Add sorting and pagination
-    pipeline.push(
-      { $sort: { createdAt: -1 } },
-      { $skip: skip },
-      { $limit: limitNum }
-    );
-
-    const applications = await Application.aggregate(pipeline);
-
-    res.json({
-      applications,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        totalPages: Math.ceil(total / limitNum)
-      }
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.getProfile = async (req, res) => {
-  try {
-    const company = await Company.findOne({ userId: req.user.userId });
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
-    }
-
-    res.json({ profile: buildCompanyProfileResponse(company) });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.updateProfile = async (req, res) => {
-  try {
-    const parsed = companyProfileSchema.parse(req.body);
-    const company = await Company.findOne({ userId: req.user.userId });
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
-    }
-
-    const previousVerificationValues = COMPANY_REVERIFICATION_FIELDS.reduce((accumulator, field) => {
-      accumulator[field] = company[field] ?? null;
-      return accumulator;
-    }, {});
-
-    // Handle email update with uniqueness check
-    if (parsed.email !== undefined) {
-      const emailTaken = await isEmailTakenByOther(parsed.email, company._id);
-      if (emailTaken) {
-        return res.status(409).json({ error: 'Email already registered' });
-      }
-      company.email = parsed.email.toLowerCase().trim();
-    }
-
     try {
-      applyCompanyProfileUpdates(company, parsed, { allowNameEdit: false });
-    } catch (error) {
-      if (error.message === 'APPROVED_COMPANY_NAME_READONLY') {
-        return res.status(400).json({ error: 'Company name cannot be edited after approval' });
-      }
-      throw error;
+        const { jobId } = req.params;
+        if (!isValidUuid(jobId)) {
+            return res.status(400).json({ error: 'Invalid job ID format' });
+        }
+        const company = await getCompanyForUser(req.user.userId);
+        if (!company)
+            return res.status(404).json({ error: 'Company not found' });
+        const { data: job } = await supabase.from('job_postings').select('*').eq('id', jobId).maybeSingle();
+        if (!job)
+            return res.status(404).json({ error: 'Job not found' });
+        if (job.company_id !== company.id) {
+            return res.status(403).json({ error: 'You can only manage your own job postings' });
+        }
+        if (job.status !== 'approved') {
+            return res.status(400).json({ error: 'Only approved jobs can be unpublished' });
+        }
+        const { data: updatedJob } = await supabase.from('job_postings').update({ status: 'unpublished' }).eq('id', jobId).select().single();
+        res.json(updatedJob);
     }
-
-    await company.save();
-    invalidatePublicCompanyProfileCache(company._id);
-
-    res.json({ profile: buildCompanyProfileResponse(company) });
-
-    const verificationFieldChanged = COMPANY_REVERIFICATION_FIELDS.some((field) => {
-      const previousValue = previousVerificationValues[field];
-      const nextValue = company[field] ?? null;
-      return String(previousValue) !== String(nextValue);
-    });
-
-    if (verificationFieldChanged && company.status === 'pending') {
-      notificationService
-        .notifyAdminsCompanyReverifyRequired({ companyId: company._id, companyName: company.name })
-        .catch((error) => {
-          console.error('Admin notification error (company reverify required):', error);
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.republishJob = async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        if (!isValidUuid(jobId)) {
+            return res.status(400).json({ error: 'Invalid job ID format' });
+        }
+        const company = await getCompanyForUser(req.user.userId);
+        if (!company)
+            return res.status(404).json({ error: 'Company not found' });
+        const { data: job } = await supabase.from('job_postings').select('*').eq('id', jobId).maybeSingle();
+        if (!job)
+            return res.status(404).json({ error: 'Job not found' });
+        if (job.company_id !== company.id) {
+            return res.status(403).json({ error: 'You can only manage your own job postings' });
+        }
+        if (job.status !== 'unpublished') {
+            return res.status(400).json({ error: 'Only unpublished jobs can be republished' });
+        }
+        const { data: updatedJob } = await supabase
+            .from('job_postings')
+            .update({ status: 'approved', approved_at: new Date().toISOString() })
+            .eq('id', jobId)
+            .select()
+            .single();
+        res.json(updatedJob);
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.closeJob = async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        if (!isValidUuid(jobId)) {
+            return res.status(400).json({ error: 'Invalid job ID format' });
+        }
+        const company = await getCompanyForUser(req.user.userId);
+        if (!company)
+            return res.status(404).json({ error: 'Company not found' });
+        const { data: job } = await supabase.from('job_postings').select('*').eq('id', jobId).maybeSingle();
+        if (!job)
+            return res.status(404).json({ error: 'Job not found' });
+        if (job.company_id !== company.id) {
+            return res.status(403).json({ error: 'You can only manage your own job postings' });
+        }
+        if (job.status === 'closed')
+            return res.status(400).json({ error: 'Job is already closed' });
+        if (job.status === 'draft') {
+            return res.status(400).json({ error: 'Draft jobs cannot be closed. Delete them instead.' });
+        }
+        const { data: updatedJob } = await supabase.from('job_postings').update({ status: 'closed' }).eq('id', jobId).select().single();
+        await supabase
+            .from('applications')
+            .update({ status: 'rejected', rejection_reason: 'Job posting has been closed' })
+            .eq('job_posting_id', jobId)
+            .in('status', ['pending', 'reviewed']);
+        res.json(updatedJob);
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+// Fetches applications matching the base DB-level filters, then joins in
+// student/job data and applies any cross-table search/filter in JS. Simpler
+// and safer than hand-rolling cross-table ILIKE via RPC for this data volume.
+const fetchApplicationsWithJoins = async ({ jobPostingIds, status, search, jobType, location, skills }) => {
+    if (!jobPostingIds.length) {
+        return [];
+    }
+    let query = supabase
+        .from('applications')
+        .select('*')
+        .in('job_posting_id', jobPostingIds)
+        .not('reviewed_at', 'is', null);
+    if (status) {
+        query = query.eq('status', status);
+    }
+    else {
+        query = query.in('status', VISIBLE_APPLICATION_STATUSES);
+    }
+    const { data: applications, error } = await query;
+    if (error)
+        throw error;
+    if (!applications || !applications.length)
+        return [];
+    const studentIds = [...new Set(applications.map((a) => a.student_id))];
+    const jobIds = [...new Set(applications.map((a) => a.job_posting_id))];
+    const [{ data: students }, { data: jobs }] = await Promise.all([
+        supabase.from('students').select('*').in('id', studentIds),
+        supabase.from('job_postings').select('*').in('id', jobIds)
+    ]);
+    const studentMap = new Map((students || []).map((s) => [s.id, s]));
+    const jobMap = new Map((jobs || []).map((j) => [j.id, j]));
+    let joined = applications.map((app) => ({
+        ...app,
+        student: studentMap.get(app.student_id) || null,
+        jobPosting: jobMap.get(app.job_posting_id) || null
+    }));
+    if (jobType) {
+        joined = joined.filter((a) => a.jobPosting?.job_type === jobType);
+    }
+    if (skills) {
+        const skillList = skills.split(',').map((s) => s.trim().toLowerCase());
+        joined = joined.filter((a) => (a.student?.skills || []).some((sk) => skillList.includes(sk.toLowerCase())));
+    }
+    if (location) {
+        const loc = location.toLowerCase();
+        joined = joined.filter((a) => (a.jobPosting?.location || '').toLowerCase().includes(loc));
+    }
+    if (search) {
+        const term = search.toLowerCase();
+        joined = joined.filter((a) => (a.student?.full_name || '').toLowerCase().includes(term) ||
+            (a.student?.email || '').toLowerCase().includes(term) ||
+            (a.jobPosting?.title || '').toLowerCase().includes(term));
+    }
+    joined.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    return joined;
+};
+exports.getJobApplications = async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        const { status, search, page = 1, limit = 10 } = req.query;
+        if (!isValidUuid(jobId)) {
+            return res.status(400).json({ error: 'Invalid job ID format' });
+        }
+        const company = await getCompanyForUser(req.user.userId);
+        if (!company)
+            return res.status(404).json({ error: 'Company not found' });
+        const { data: job } = await supabase.from('job_postings').select('*').eq('id', jobId).maybeSingle();
+        if (!job)
+            return res.status(404).json({ error: 'Job not found' });
+        if (job.company_id !== company.id) {
+            return res.status(403).json({ error: 'You can only view applications for your own jobs' });
+        }
+        if (status && !VISIBLE_APPLICATION_STATUSES.includes(status)) {
+            return res.status(400).json({ error: 'Status must be reviewed, interview_scheduled, offer_extended, hired, or rejected' });
+        }
+        const pageNum = Math.max(1, parseInt(page) || 1);
+        const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 10));
+        const applications = await fetchApplicationsWithJoins({ jobPostingIds: [jobId], status, search });
+        const total = applications.length;
+        const paged = applications.slice((pageNum - 1) * limitNum, (pageNum - 1) * limitNum + limitNum);
+        res.json({
+            applications: paged,
+            pagination: { page: pageNum, limit: limitNum, total, totalPages: Math.ceil(total / limitNum) }
         });
     }
-  } catch (error) {
-    if (error.name === 'ZodError') {
-      return res.status(400).json({ error: error.issues[0].message });
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
     }
-
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
 };
-
-exports.uploadLogo = async (req, res) => {
-  try {
-    const company = await Company.findOne({ userId: req.user.userId });
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
-    }
-
-    if (!req.file) {
-      return res.status(400).json({ error: 'Logo file is required' });
-    }
-
+exports.getAllApplications = async (req, res) => {
     try {
-      const logoUrl = await uploadCompanyLogo(req.file);
-      company.logo = logoUrl;
-      await company.save();
-      invalidatePublicCompanyProfileCache(company._id);
-
-      return res.json({ logo: logoUrl });
-    } catch (uploadError) {
-      console.error(uploadError);
-      return res.status(500).json({ error: 'Failed to upload logo' });
+        const { status, search, jobType, location, skills, page = 1, limit = 10 } = req.query;
+        const company = await getCompanyForUser(req.user.userId);
+        if (!company)
+            return res.status(404).json({ error: 'Company not found' });
+        if (status && !VISIBLE_APPLICATION_STATUSES.includes(status)) {
+            return res.status(400).json({ error: 'Status must be reviewed, interview_scheduled, offer_extended, hired, or rejected' });
+        }
+        if (jobType && !JOB_TYPES.includes(jobType)) {
+            return res.status(400).json({ error: `Job type must be one of: ${JOB_TYPES.join(', ')}` });
+        }
+        const { data: companyJobs } = await supabase.from('job_postings').select('id').eq('company_id', company.id);
+        const jobIds = (companyJobs || []).map((j) => j.id);
+        const pageNum = Math.max(1, parseInt(page) || 1);
+        const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 10));
+        const applications = await fetchApplicationsWithJoins({ jobPostingIds: jobIds, status, search, jobType, location, skills });
+        const total = applications.length;
+        const paged = applications.slice((pageNum - 1) * limitNum, (pageNum - 1) * limitNum + limitNum);
+        res.json({
+            applications: paged,
+            pagination: { page: pageNum, limit: limitNum, total, totalPages: Math.ceil(total / limitNum) }
+        });
     }
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
 };
-
+exports.getProfile = async (req, res) => {
+    try {
+        const company = await getCompanyForUser(req.user.userId);
+        if (!company)
+            return res.status(404).json({ error: 'Company not found' });
+        res.json({ profile: (0, companyProfileService_1.buildCompanyProfileResponse)(company) });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.updateProfile = async (req, res) => {
+    try {
+        const parsed = companyProfileSchema.parse(req.body);
+        const company = await getCompanyForUser(req.user.userId);
+        if (!company)
+            return res.status(404).json({ error: 'Company not found' });
+        const previousVerificationValues = {};
+        for (const field of COMPANY_REVERIFICATION_FIELDS) {
+            previousVerificationValues[field] = company[field] ?? null;
+        }
+        if (parsed.email !== undefined) {
+            const emailTaken = await isEmailTakenByOther(parsed.email, company.id);
+            if (emailTaken) {
+                return res.status(409).json({ error: 'Email already registered' });
+            }
+            parsed.email = parsed.email.toLowerCase().trim();
+        }
+        let updates;
+        let nextCompany;
+        try {
+            const result = (0, companyProfileService_1.applyCompanyProfileUpdates)(company, parsed, { allowNameEdit: false });
+            updates = result.updates;
+            nextCompany = result.company;
+        }
+        catch (error) {
+            if (error.message === 'APPROVED_COMPANY_NAME_READONLY') {
+                return res.status(400).json({ error: 'Company name cannot be edited after approval' });
+            }
+            throw error;
+        }
+        if (parsed.email !== undefined) {
+            updates.email = parsed.email;
+            nextCompany.email = parsed.email;
+        }
+        if (Object.keys(updates).length > 0) {
+            const { error } = await supabase.from('companies').update(updates).eq('id', company.id);
+            if (error)
+                throw error;
+        }
+        (0, companyProfileService_1.invalidatePublicCompanyProfileCache)(company.id);
+        res.json({ profile: (0, companyProfileService_1.buildCompanyProfileResponse)(nextCompany) });
+        const verificationFieldChanged = COMPANY_REVERIFICATION_FIELDS.some((field) => {
+            const previousValue = previousVerificationValues[field];
+            const nextValue = nextCompany[field] ?? null;
+            return String(previousValue) !== String(nextValue);
+        });
+        if (verificationFieldChanged && company.status === 'pending') {
+            notificationService
+                .notifyAdminsCompanyReverifyRequired({ companyId: company.id, companyName: nextCompany.name })
+                .catch((error) => console.error('Admin notification error (company reverify required):', error));
+        }
+    }
+    catch (error) {
+        if (error.name === 'ZodError') {
+            return res.status(400).json({ error: error.issues[0].message });
+        }
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.uploadLogo = async (req, res) => {
+    try {
+        const company = await getCompanyForUser(req.user.userId);
+        if (!company)
+            return res.status(404).json({ error: 'Company not found' });
+        if (!req.file) {
+            return res.status(400).json({ error: 'Logo file is required' });
+        }
+        try {
+            const logoUrl = await uploadCompanyLogo(req.file);
+            await supabase.from('companies').update({ logo: logoUrl }).eq('id', company.id);
+            (0, companyProfileService_1.invalidatePublicCompanyProfileCache)(company.id);
+            return res.json({ logo: logoUrl });
+        }
+        catch (uploadError) {
+            console.error(uploadError);
+            return res.status(500).json({ error: 'Failed to upload logo' });
+        }
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
 exports.getPublicProfile = async (req, res) => {
-  try {
-    const { companyId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(companyId)) {
-      return res.status(400).json({ error: 'Invalid company ID format' });
+    try {
+        const { companyId } = req.params;
+        if (!isValidUuid(companyId)) {
+            return res.status(400).json({ error: 'Invalid company ID format' });
+        }
+        const cached = (0, companyProfileService_1.getCachedPublicCompanyProfile)(companyId);
+        if (cached) {
+            return res.json({ profile: cached });
+        }
+        const { data: company } = await supabase.from('companies').select('*').eq('id', companyId).eq('status', 'approved').maybeSingle();
+        if (!company) {
+            return res.status(404).json({ error: 'Company profile not found' });
+        }
+        const profile = (0, companyProfileService_1.buildPublicCompanyProfile)(company);
+        (0, companyProfileService_1.setCachedPublicCompanyProfile)(companyId, profile);
+        res.json({ profile });
     }
-
-    const cached = getCachedPublicCompanyProfile(companyId);
-    if (cached) {
-      return res.json({ profile: cached });
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
     }
-
-    const company = await Company.findOne({ _id: companyId, status: 'approved' });
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company profile not found' });
-    }
-
-    const profile = buildPublicCompanyProfile(company);
-    setCachedPublicCompanyProfile(companyId, profile);
-
-    res.json({ profile });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
 };
-
 exports.updateApplication = async (req, res) => {
-  try {
-    const { appId } = req.params;
-    const { status, rejectionReason, interviewDate, interviewTimeZone, interviewNotes, offerDetails } = req.body;
-
-    if (!['interview_scheduled', 'offer_extended', 'hired', 'rejected'].includes(status)) {
-      return res.status(400).json({ error: "Status must be 'interview_scheduled', 'offer_extended', 'hired', or 'rejected'" });
+    try {
+        const { appId } = req.params;
+        const { status, rejectionReason, interviewDate, interviewTimeZone, interviewNotes, offerDetails } = req.body;
+        if (!['interview_scheduled', 'offer_extended', 'hired', 'rejected'].includes(status)) {
+            return res.status(400).json({ error: "Status must be 'interview_scheduled', 'offer_extended', 'hired', or 'rejected'" });
+        }
+        const normalizeOptionalText = (value) => {
+            if (value === undefined || value === null || typeof value !== 'string')
+                return null;
+            const trimmed = value.trim();
+            return trimmed.length ? trimmed : null;
+        };
+        const normalizedInterviewNotes = normalizeOptionalText(interviewNotes);
+        const normalizedOfferDetails = normalizeOptionalText(offerDetails);
+        if (interviewNotes !== undefined && typeof interviewNotes !== 'string') {
+            return res.status(400).json({ error: 'interviewNotes must be a string' });
+        }
+        if (offerDetails !== undefined && typeof offerDetails !== 'string') {
+            return res.status(400).json({ error: 'offerDetails must be a string' });
+        }
+        if (interviewTimeZone !== undefined && interviewTimeZone !== null && typeof interviewTimeZone !== 'string') {
+            return res.status(400).json({ error: 'interviewTimeZone must be a string' });
+        }
+        const { utcDate: normalizedInterviewDate, error: interviewDateError } = convertInterviewDateToUtc({
+            interviewDateInput: interviewDate,
+            interviewTimeZone
+        });
+        if (interviewDateError) {
+            return res.status(400).json({ error: interviewDateError });
+        }
+        if (!isValidUuid(appId)) {
+            return res.status(400).json({ error: 'Invalid application ID format' });
+        }
+        const company = await getCompanyForUser(req.user.userId);
+        if (!company)
+            return res.status(404).json({ error: 'Company not found' });
+        const { data: application } = await supabase.from('applications').select('*').eq('id', appId).maybeSingle();
+        if (!application)
+            return res.status(404).json({ error: 'Application not found' });
+        const { data: jobPosting } = await supabase.from('job_postings').select('*').eq('id', application.job_posting_id).maybeSingle();
+        if (!jobPosting || jobPosting.company_id !== company.id) {
+            return res.status(403).json({ error: 'You can only manage applications for your own jobs' });
+        }
+        const allowedTransitions = {
+            reviewed: ['interview_scheduled', 'rejected'],
+            interview_scheduled: ['offer_extended', 'rejected'],
+            offer_extended: ['hired', 'rejected']
+        };
+        const allowedNextStatuses = allowedTransitions[application.status] || [];
+        if (!allowedNextStatuses.includes(status)) {
+            if (application.status === 'pending') {
+                return res.status(400).json({ error: 'Can only hire/reject applications that have been reviewed by admin' });
+            }
+            if (['hired', 'rejected'].includes(application.status)) {
+                return res.status(400).json({ error: 'This application has already been processed' });
+            }
+            if (application.status === 'withdrawn') {
+                return res.status(400).json({ error: 'Cannot process withdrawn applications' });
+            }
+            return res.status(400).json({ error: `Invalid transition from ${application.status} to ${status}` });
+        }
+        const update = { status, reviewed_at: new Date().toISOString() };
+        if (status === 'interview_scheduled') {
+            update.interview_date = normalizedInterviewDate ? normalizedInterviewDate.toISOString() : null;
+            update.interview_notes = normalizedInterviewNotes;
+            update.offer_details = null;
+            update.rejection_reason = null;
+            update.rejection_source = null;
+        }
+        else if (status === 'offer_extended') {
+            update.offer_details = normalizedOfferDetails;
+            update.rejection_reason = null;
+            update.rejection_source = null;
+        }
+        else if (status === 'rejected') {
+            update.rejection_reason = typeof rejectionReason === 'string' && rejectionReason.trim().length > 0 ? rejectionReason.trim() : null;
+            update.rejection_source = 'company';
+        }
+        else {
+            update.rejection_reason = null;
+            update.rejection_source = null;
+        }
+        await supabase.from('applications').update(update).eq('id', appId);
+        if (status === 'hired') {
+            await supabase.from('students').update({ is_hired: true }).eq('id', application.student_id);
+        }
+        const [{ data: updatedApp }, { data: student }, { data: job }] = await Promise.all([
+            supabase.from('applications').select('*').eq('id', appId).single(),
+            supabase.from('students').select('full_name, email, profile_link, is_hired, user_id').eq('id', application.student_id).maybeSingle(),
+            supabase.from('job_postings').select('title').eq('id', application.job_posting_id).maybeSingle()
+        ]);
+        res.json({ ...updatedApp, student, jobPosting: job });
+        if (!student || !job) {
+            return;
+        }
+        if (status === 'interview_scheduled') {
+            notificationService
+                .notifyApplicationInterviewScheduled(student.user_id, {
+                jobTitle: job.title,
+                companyName: company.name,
+                interviewDate: update.interview_date
+            })
+                .catch((err) => console.error('Notification error (interview scheduled):', err));
+        }
+        if (status === 'offer_extended') {
+            notificationService
+                .notifyApplicationOfferExtended(student.user_id, { jobTitle: job.title, companyName: company.name })
+                .catch((err) => console.error('Notification error (offer extended):', err));
+        }
+        if (status === 'rejected') {
+            notificationService
+                .notifyApplicationRejected(student.user_id, { jobTitle: job.title, companyName: company.name })
+                .catch((err) => console.error('Notification error (company rejected):', err));
+        }
+        if (status === 'hired') {
+            emailService
+                .sendApplicationStatusEmail(student.email, { status: 'hired', jobTitle: job.title, companyName: company.name, studentName: student.full_name }, { userId: student.user_id })
+                .catch((error) => console.error('Failed to send application hired email', error));
+            notificationService
+                .notifyApplicationHired(student.user_id, { jobTitle: job.title, companyName: company.name })
+                .catch((err) => console.error('Notification error (hired):', err));
+        }
     }
-
-    const normalizeOptionalText = (value) => {
-      if (value === undefined || value === null) {
-        return null;
-      }
-
-      if (typeof value !== 'string') {
-        return null;
-      }
-
-      const trimmed = value.trim();
-      return trimmed.length ? trimmed : null;
-    };
-
-    const normalizedInterviewNotes = normalizeOptionalText(interviewNotes);
-    const normalizedOfferDetails = normalizeOptionalText(offerDetails);
-
-    if (interviewNotes !== undefined && typeof interviewNotes !== 'string') {
-      return res.status(400).json({ error: 'interviewNotes must be a string' });
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
     }
-
-    if (offerDetails !== undefined && typeof offerDetails !== 'string') {
-      return res.status(400).json({ error: 'offerDetails must be a string' });
-    }
-
-    if (interviewTimeZone !== undefined && interviewTimeZone !== null && typeof interviewTimeZone !== 'string') {
-      return res.status(400).json({ error: 'interviewTimeZone must be a string' });
-    }
-
-    const { utcDate: normalizedInterviewDate, error: interviewDateError } = convertInterviewDateToUtc({
-      interviewDateInput: interviewDate,
-      interviewTimeZone
-    });
-
-    if (interviewDateError) {
-      return res.status(400).json({ error: interviewDateError });
-    }
-
-    if (!mongoose.Types.ObjectId.isValid(appId)) {
-      return res.status(400).json({ error: 'Invalid application ID format' });
-    }
-
-    const company = await Company.findOne({ userId: req.user.userId });
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
-    }
-
-    const application = await Application.findById(appId).populate('jobPostingId');
-
-    if (!application) {
-      return res.status(404).json({ error: 'Application not found' });
-    }
-
-    if (!application.jobPostingId.companyId.equals(company._id)) {
-      return res.status(403).json({ error: 'You can only manage applications for your own jobs' });
-    }
-
-    const allowedTransitions = {
-      reviewed: ['interview_scheduled', 'rejected'],
-      interview_scheduled: ['offer_extended', 'rejected'],
-      offer_extended: ['hired', 'rejected']
-    };
-
-    const allowedNextStatuses = allowedTransitions[application.status] || [];
-
-    if (!allowedNextStatuses.includes(status)) {
-      if (application.status === 'pending') {
-        return res.status(400).json({ error: 'Can only hire/reject applications that have been reviewed by admin' });
-      }
-      if (['hired', 'rejected'].includes(application.status)) {
-        return res.status(400).json({ error: 'This application has already been processed' });
-      }
-      if (application.status === 'withdrawn') {
-        return res.status(400).json({ error: 'Cannot process withdrawn applications' });
-      }
-
-      return res.status(400).json({ error: `Invalid transition from ${application.status} to ${status}` });
-    }
-
-    // Update application status
-    application.status = status;
-    application.reviewedAt = new Date();
-
-    if (status === 'interview_scheduled') {
-      application.interviewDate = normalizedInterviewDate;
-      application.interviewNotes = normalizedInterviewNotes;
-      application.offerDetails = null;
-      application.rejectionReason = null;
-      application.rejectionSource = null;
-    } else if (status === 'offer_extended') {
-      application.offerDetails = normalizedOfferDetails;
-      application.rejectionReason = null;
-      application.rejectionSource = null;
-    } else if (status === 'rejected') {
-      application.rejectionReason = (typeof rejectionReason === 'string' && rejectionReason.trim().length > 0)
-        ? rejectionReason.trim()
-        : null;
-      application.rejectionSource = 'company';
-    } else {
-      application.rejectionReason = null;
-      application.rejectionSource = null;
-    }
-    await application.save();
-
-    // If hired, update student's isHired flag
-    if (status === 'hired') {
-      await Student.findByIdAndUpdate(
-        application.studentId,
-        { isHired: true }
-      );
-    }
-
-    const updatedApp = await Application.findById(appId)
-      .populate('studentId', 'fullName email profileLink isHired userId')
-      .populate('jobPostingId', 'title');
-
-    res.json(updatedApp);
-
-    if (status === 'interview_scheduled') {
-      notificationService
-        .notifyApplicationInterviewScheduled(updatedApp.studentId.userId, {
-          jobTitle: updatedApp.jobPostingId.title,
-          companyName: company.name,
-          interviewDate: updatedApp.interviewDate
-        })
-        .catch((err) => console.error('Notification error (interview scheduled):', err));
-    }
-
-    if (status === 'offer_extended') {
-      notificationService
-        .notifyApplicationOfferExtended(updatedApp.studentId.userId, {
-          jobTitle: updatedApp.jobPostingId.title,
-          companyName: company.name
-        })
-        .catch((err) => console.error('Notification error (offer extended):', err));
-    }
-
-    if (status === 'rejected') {
-      notificationService
-        .notifyApplicationRejected(updatedApp.studentId.userId, {
-          jobTitle: updatedApp.jobPostingId.title,
-          companyName: company.name
-        })
-        .catch((err) => console.error('Notification error (company rejected):', err));
-    }
-
-    if (status === 'hired') {
-      emailService
-        .sendApplicationStatusEmail(
-          updatedApp.studentId.email,
-          {
-            status: 'hired',
-            jobTitle: updatedApp.jobPostingId.title,
-            companyName: company.name,
-            studentName: updatedApp.studentId.fullName
-          },
-          { userId: updatedApp.studentId.userId }
-        )
-        .catch((error) => console.error('Failed to send application hired email', error));
-
-      notificationService
-        .notifyApplicationHired(updatedApp.studentId.userId, {
-          jobTitle: updatedApp.jobPostingId.title,
-          companyName: company.name
-        })
-        .catch((err) => console.error('Notification error (hired):', err));
-    }
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
 };
-
 exports.getStudentProfile = async (req, res) => {
-  try {
-    const { studentId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(studentId)) {
-      return res.status(400).json({ error: 'Invalid student ID format' });
+    try {
+        const { studentId } = req.params;
+        if (!isValidUuid(studentId)) {
+            return res.status(400).json({ error: 'Invalid student ID format' });
+        }
+        const company = await getCompanyForUser(req.user.userId);
+        if (!company)
+            return res.status(404).json({ error: 'Company not found' });
+        const { data: companyJobs } = await supabase.from('job_postings').select('id').eq('company_id', company.id);
+        const companyJobIds = (companyJobs || []).map((j) => j.id);
+        let hasApprovedApplication = false;
+        if (companyJobIds.length) {
+            const { count } = await supabase
+                .from('applications')
+                .select('*', { count: 'exact', head: true })
+                .eq('student_id', studentId)
+                .in('job_posting_id', companyJobIds)
+                .in('status', ['reviewed', 'hired']);
+            hasApprovedApplication = (count ?? 0) > 0;
+        }
+        if (!hasApprovedApplication) {
+            return res.status(403).json({ error: 'You can only view profiles of students with approved applications to your jobs' });
+        }
+        const { data: student } = await supabase
+            .from('students')
+            .select('full_name, email, profile_link, bio, location, available_from, skills, education, experience, resume_url, intro_video_url, is_hired')
+            .eq('id', studentId)
+            .maybeSingle();
+        if (!student) {
+            return res.status(404).json({ error: 'Student not found' });
+        }
+        const [resumeUrl, introVideoUrl] = await Promise.all([
+            student.resume_url ? getPresignedUrl(student.resume_url) : null,
+            student.intro_video_url ? getPresignedUrl(student.intro_video_url) : null
+        ]);
+        res.json({
+            id: studentId,
+            fullName: student.full_name,
+            email: student.email,
+            profileLink: student.profile_link || null,
+            bio: student.bio || null,
+            location: student.location || null,
+            availableFrom: student.available_from || null,
+            skills: student.skills || [],
+            education: student.education || [],
+            experience: student.experience || [],
+            resumeUrl,
+            introVideoUrl,
+            isHired: student.is_hired
+        });
     }
-
-    const company = await Company.findOne({ userId: req.user.userId });
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
     }
-
-    // Get all job IDs for this company
-    const companyJobIds = await JobPosting.find({ companyId: company._id }).distinct('_id');
-
-    // Check if student has an approved application for any of the company's jobs
-    const hasApprovedApplication = await Application.exists({
-      studentId,
-      jobPostingId: { $in: companyJobIds },
-      status: { $in: ['reviewed', 'hired'] }
-    });
-
-    if (!hasApprovedApplication) {
-      return res.status(403).json({ error: 'You can only view profiles of students with approved applications to your jobs' });
-    }
-
-    const student = await Student.findById(studentId).select(
-      'fullName email profileLink bio location availableFrom skills education experience resumeUrl introVideoUrl isHired'
-    );
-
-    if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
-    }
-
-    // Generate presigned URLs for media files
-    const [resumeUrl, introVideoUrl] = await Promise.all([
-      student.resumeUrl ? getPresignedUrl(student.resumeUrl) : null,
-      student.introVideoUrl ? getPresignedUrl(student.introVideoUrl) : null
-    ]);
-
-    res.json({
-      id: student._id,
-      fullName: student.fullName,
-      email: student.email,
-      profileLink: student.profileLink || null,
-      bio: student.bio || null,
-      location: student.location || null,
-      availableFrom: student.availableFrom || null,
-      skills: student.skills || [],
-      education: student.education || [],
-      experience: student.experience || [],
-      resumeUrl,
-      introVideoUrl,
-      isHired: student.isHired
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
 };
-
-exports.getCountries = async (req, res) => {
-  try {
-    const Zone = require('../models/Zone');
-
-    const countries = await ZoneCountry.find()
-      .populate('zoneId', 'name')
-      .sort({ countryName: 1 })
-      .lean();
-
-    const formattedCountries = countries.map(c => ({
-      id: c._id,
-      name: c.countryName,
-      zone: c.zoneId ? {
-        id: c.zoneId._id,
-        name: c.zoneId.name
-      } : null
-    }));
-
-    res.json({ countries: formattedCountries });
-  } catch (error) {
-    console.error('Get countries error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+exports.getCountries = async (_req, res) => {
+    try {
+        const { data: countries, error } = await supabase
+            .from('zone_countries')
+            .select('id, country_name, zone_id, zones ( id, name )')
+            .order('country_name', { ascending: true });
+        if (error)
+            throw error;
+        const formattedCountries = (countries || []).map((c) => ({
+            id: c.id,
+            name: c.country_name,
+            zone: c.zones ? { id: c.zones.id, name: c.zones.name } : null
+        }));
+        res.json({ countries: formattedCountries });
+    }
+    catch (error) {
+        console.error('Get countries error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
 };
+//# sourceMappingURL=companyController.js.map

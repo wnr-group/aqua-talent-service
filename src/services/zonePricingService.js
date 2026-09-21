@@ -1,96 +1,74 @@
-const mongoose = require('mongoose');
-
-const PlanZone = require('../models/PlanZone');
-const SubscriptionZone = require('../models/SubscriptionZone');
-const SubscriptionAddon = require('../models/SubscriptionAddon');
-
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.getPayPerJobPricing = exports.getAdditionalJobCredits = exports.ensureSubscriptionZonesForPlan = void 0;
+const client_1 = require("../lib/supabase/client");
 const ensureSubscriptionZonesForPlan = async ({ subscriptionId, serviceId }) => {
-  if (!subscriptionId || !serviceId) {
-    return 0;
-  }
-
-  const AvailableService = require('../models/AvailableService');
-  const plan = await AvailableService.findById(serviceId);
-
-  // Skip if plan has allZonesIncluded
-  if (plan?.allZonesIncluded) {
-    return 0;
-  }
-
-  const planZones = await PlanZone.find({ planId: serviceId }).select('zoneId').lean();
-
-  if (!planZones.length) {
-    return 0;
-  }
-
-  const createdAt = new Date();
-  const operations = planZones.map((planZone) => ({
-    updateOne: {
-      filter: {
-        subscriptionId,
-        zoneId: planZone.zoneId
-      },
-      update: {
-        $setOnInsert: {
-          subscriptionId,
-          zoneId: planZone.zoneId,
-          source: 'plan',
-          createdAt
-        }
-      },
-      upsert: true
+    if (!subscriptionId || !serviceId) {
+        return 0;
     }
-  }));
-
-  const result = await SubscriptionZone.bulkWrite(operations, { ordered: false });
-  return result.upsertedCount || 0;
+    const supabase = (0, client_1.getSupabaseClient)();
+    const { data: plan } = await supabase.from('available_services').select('all_zones_included').eq('id', serviceId).maybeSingle();
+    // Skip if plan has allZonesIncluded
+    if (plan?.all_zones_included) {
+        return 0;
+    }
+    const { data: planZones } = await supabase.from('plan_zones').select('zone_id').eq('plan_id', serviceId);
+    if (!planZones || !planZones.length) {
+        return 0;
+    }
+    const rows = planZones.map((pz) => ({
+        subscription_id: subscriptionId,
+        zone_id: pz.zone_id,
+        source: 'plan'
+    }));
+    const { data: inserted, error } = await supabase
+        .from('subscription_zones')
+        .upsert(rows, { onConflict: 'subscription_id,zone_id', ignoreDuplicates: true })
+        .select();
+    if (error) {
+        throw error;
+    }
+    return inserted?.length || 0;
 };
-
+exports.ensureSubscriptionZonesForPlan = ensureSubscriptionZonesForPlan;
 const getAdditionalJobCredits = async (subscriptionId) => {
-  if (!subscriptionId || !mongoose.Types.ObjectId.isValid(subscriptionId)) {
-    return 0;
-  }
-
-  const objectId = new mongoose.Types.ObjectId(subscriptionId);
-  const [summary] = await SubscriptionAddon.aggregate([
-    {
-      $match: {
-        subscriptionId: objectId
-      }
-    },
-    {
-      $lookup: {
-        from: 'addons',
-        localField: 'addonId',
-        foreignField: '_id',
-        as: 'addon'
-      }
-    },
-    { $unwind: '$addon' },
-    {
-      $match: {
-        'addon.type': 'jobs'
-      }
-    },
-    {
-      $group: {
-        _id: null,
-        totalCredits: {
-          $sum: {
-            $multiply: [
-              '$quantity',
-              { $ifNull: ['$addon.jobCreditCount', 0] }
-            ]
-          }
-        }
-      }
+    if (!subscriptionId) {
+        return 0;
     }
-  ]);
-
-  return summary?.totalCredits || 0;
+    const supabase = (0, client_1.getSupabaseClient)();
+    const { data: subAddons } = await supabase
+        .from('subscription_addons')
+        .select('addon_id, quantity')
+        .eq('subscription_id', subscriptionId);
+    if (!subAddons || !subAddons.length) {
+        return 0;
+    }
+    const addonIds = subAddons.map((sa) => sa.addon_id);
+    const { data: addons } = await supabase
+        .from('addons')
+        .select('id, job_credit_count')
+        .in('id', addonIds)
+        .eq('type', 'jobs');
+    const jobAddonCredits = new Map((addons || []).map((a) => [a.id, a.job_credit_count || 0]));
+    return subAddons.reduce((total, sa) => {
+        const credits = jobAddonCredits.get(sa.addon_id);
+        return credits === undefined ? total : total + sa.quantity * credits;
+    }, 0);
 };
-
-module.exports = {
-  ensureSubscriptionZonesForPlan,
-  getAdditionalJobCredits
+exports.getAdditionalJobCredits = getAdditionalJobCredits;
+/** Mirrors the old Addon.getPayPerJobPricing() static. */
+const getPayPerJobPricing = async () => {
+    const supabase = (0, client_1.getSupabaseClient)();
+    const { data: addon } = await supabase
+        .from('addons')
+        .select('price_inr, price_usd')
+        .eq('type', 'pay-per-job')
+        .maybeSingle();
+    if (addon) {
+        return { priceINR: addon.price_inr ?? 0, priceUSD: addon.price_usd ?? 0 };
+    }
+    // Fallback defaults if not configured
+    return { priceINR: 2500, priceUSD: 35 };
 };
+exports.getPayPerJobPricing = getPayPerJobPricing;
+//# sourceMappingURL=zonePricingService.js.map

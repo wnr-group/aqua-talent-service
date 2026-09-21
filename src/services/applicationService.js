@@ -1,141 +1,122 @@
-const Student = require('../models/Student');
-const ActiveSubscription = require('../models/ActiveSubscription');
-const Application = require('../models/Application');
-const { getApplicationLimit } = require('./subscriptionService');
-
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.validateWithdrawal = exports.canApply = exports.decrementApplicationCount = exports.incrementApplicationCount = exports.getSubscriptionUsage = void 0;
+const client_1 = require("../lib/supabase/client");
+const subscriptionService_1 = require("./subscriptionService");
 const getSubscriptionUsage = async (studentId) => {
-  const student = await Student.findById(studentId);
-
-  if (!student?.currentSubscriptionId) {
-    return { applicationsUsed: 0, subscription: null };
-  }
-
-  const subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
-    .populate('serviceId', 'maxApplications');
-
-  if (!subscription) {
-    return { applicationsUsed: 0, subscription: null };
-  }
-
-  return {
-    applicationsUsed: subscription.applicationsUsed || 0,
-    subscription
-  };
-};
-
-const incrementApplicationCount = async (studentId) => {
-  const student = await Student.findById(studentId);
-
-  if (!student?.currentSubscriptionId) {
-    return null;
-  }
-
-  const subscription = await ActiveSubscription.findByIdAndUpdate(
-    student.currentSubscriptionId,
-    { $inc: { applicationsUsed: 1 } },
-    { returnDocument: 'after' }
-  );
-
-  return subscription;
-};
-
-const decrementApplicationCount = async (studentId) => {
-  const student = await Student.findById(studentId);
-
-  if (!student?.currentSubscriptionId) {
-    return null;
-  }
-
-  // Only decrement if applicationsUsed > 0
-  const subscription = await ActiveSubscription.findOneAndUpdate(
-    { _id: student.currentSubscriptionId, applicationsUsed: { $gt: 0 } },
-    { $inc: { applicationsUsed: -1 } },
-    { returnDocument: 'after' }
-  );
-
-  return subscription;
-};
-
-const canApply = async (studentId) => {
-  const student = await Student.findById(studentId);
-
-  if (!student) {
-    return {
-      canApply: false,
-      reason: 'not_found'
-    };
-  }
-
-  if (student.isHired) {
-    return {
-      canApply: false,
-      reason: 'hired'
-    };
-  }
-
-  const applicationLimit = await getApplicationLimit(studentId);
-  const { applicationsUsed } = await getSubscriptionUsage(studentId);
-
-  if (student.subscriptionTier === 'free') {
-    const submittedApplications = await Application.countDocuments({ studentId });
-
-    if (submittedApplications >= applicationLimit) {
-      return {
-        canApply: false,
-        reason: 'free_tier_limit',
-        applicationsUsed: submittedApplications,
-        applicationLimit,
-        message: 'Free tier allows only 2 job applications'
-      };
+    const supabase = (0, client_1.getSupabaseClient)();
+    const { data: student } = await supabase.from('students').select('current_subscription_id').eq('id', studentId).maybeSingle();
+    if (!student?.current_subscription_id) {
+        return { applicationsUsed: 0, subscription: null };
     }
-  }
-
-  if (applicationLimit === Infinity) {
+    const { data: subscription } = await supabase
+        .from('active_subscriptions')
+        .select('*')
+        .eq('id', student.current_subscription_id)
+        .maybeSingle();
+    if (!subscription) {
+        return { applicationsUsed: 0, subscription: null };
+    }
     return {
-      canApply: true,
-      applicationsUsed,
-      applicationLimit: null
+        applicationsUsed: subscription.applications_used || 0,
+        subscription
     };
-  }
-
-  if (applicationsUsed >= applicationLimit) {
-    return {
-      canApply: false,
-      reason: 'limit',
-      applicationsUsed,
-      applicationLimit
-    };
-  }
-
-  return {
-    canApply: true,
-    applicationsUsed,
-    applicationLimit
-  };
 };
-
+exports.getSubscriptionUsage = getSubscriptionUsage;
+const incrementApplicationCount = async (studentId) => {
+    const supabase = (0, client_1.getSupabaseClient)();
+    const { data: student } = await supabase.from('students').select('current_subscription_id').eq('id', studentId).maybeSingle();
+    if (!student?.current_subscription_id) {
+        return null;
+    }
+    const { data: current } = await supabase
+        .from('active_subscriptions')
+        .select('applications_used')
+        .eq('id', student.current_subscription_id)
+        .maybeSingle();
+    const { data: subscription } = await supabase
+        .from('active_subscriptions')
+        .update({ applications_used: (current?.applications_used || 0) + 1 })
+        .eq('id', student.current_subscription_id)
+        .select()
+        .maybeSingle();
+    return subscription;
+};
+exports.incrementApplicationCount = incrementApplicationCount;
+const decrementApplicationCount = async (studentId) => {
+    const supabase = (0, client_1.getSupabaseClient)();
+    const { data: student } = await supabase.from('students').select('current_subscription_id').eq('id', studentId).maybeSingle();
+    if (!student?.current_subscription_id) {
+        return null;
+    }
+    // Only decrement if applications_used > 0
+    const { data: current } = await supabase
+        .from('active_subscriptions')
+        .select('applications_used')
+        .eq('id', student.current_subscription_id)
+        .gt('applications_used', 0)
+        .maybeSingle();
+    if (!current) {
+        return null;
+    }
+    const { data: subscription } = await supabase
+        .from('active_subscriptions')
+        .update({ applications_used: current.applications_used - 1 })
+        .eq('id', student.current_subscription_id)
+        .select()
+        .maybeSingle();
+    return subscription;
+};
+exports.decrementApplicationCount = decrementApplicationCount;
+const canApply = async (studentId) => {
+    const supabase = (0, client_1.getSupabaseClient)();
+    const { data: student } = await supabase.from('students').select('*').eq('id', studentId).maybeSingle();
+    if (!student) {
+        return { canApply: false, reason: 'not_found' };
+    }
+    if (student.is_hired) {
+        return { canApply: false, reason: 'hired' };
+    }
+    const applicationLimit = await (0, subscriptionService_1.getApplicationLimit)(studentId);
+    const { applicationsUsed } = await (0, exports.getSubscriptionUsage)(studentId);
+    if (student.subscription_tier === 'free') {
+        const { count: submittedApplications } = await supabase
+            .from('applications')
+            .select('*', { count: 'exact', head: true })
+            .eq('student_id', studentId);
+        if ((submittedApplications ?? 0) >= applicationLimit) {
+            return {
+                canApply: false,
+                reason: 'free_tier_limit',
+                applicationsUsed: submittedApplications ?? 0,
+                applicationLimit,
+                message: 'Free tier allows only 2 job applications'
+            };
+        }
+    }
+    if (applicationLimit === Infinity) {
+        return { canApply: true, applicationsUsed, applicationLimit: null };
+    }
+    if (applicationsUsed >= applicationLimit) {
+        return { canApply: false, reason: 'limit', applicationsUsed, applicationLimit };
+    }
+    return { canApply: true, applicationsUsed, applicationLimit };
+};
+exports.canApply = canApply;
 /**
  * Business rule: a student may request withdrawal when their application is
- * in `pending` or `reviewed` (shortlisted) state.  For every other status the
+ * in `pending` or `reviewed` (shortlisted) state. For every other status the
  * request is denied so callers can surface a useful error without throwing.
  */
 const validateWithdrawal = (application) => {
-  const allowedStatuses = ['pending', 'reviewed'];
-
-  if (!allowedStatuses.includes(application.status)) {
-    return {
-      allowed: false,
-      message: `Withdrawal request is not allowed for applications with status '${application.status}'.`
-    };
-  }
-
-  return { allowed: true };
+    const allowedStatuses = ['pending', 'reviewed'];
+    if (!allowedStatuses.includes(application.status)) {
+        return {
+            allowed: false,
+            message: `Withdrawal request is not allowed for applications with status '${application.status}'.`
+        };
+    }
+    return { allowed: true };
 };
-
-module.exports = {
-  getSubscriptionUsage,
-  incrementApplicationCount,
-  decrementApplicationCount,
-  validateWithdrawal,
-  canApply
-};
+exports.validateWithdrawal = validateWithdrawal;
+//# sourceMappingURL=applicationService.js.map

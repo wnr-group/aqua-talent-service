@@ -1,1282 +1,865 @@
-const mongoose = require('mongoose');
-
-const Student = require('../models/Student');
-const Company = require('../models/Company');
-const JobPosting = require('../models/JobPosting');
-const Application = require('../models/Application');
-const ActiveSubscription = require('../models/ActiveSubscription');
-const AvailableService = require('../models/AvailableService');
-const Zone = require('../models/Zone');
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const client_1 = require("../lib/supabase/client");
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { STUDENT_APPLICATION_STATUS_MAP } = require('../constants');
-const { getApplicationLimit } = require('../services/subscriptionService');
-const { getSubscriptionUsage, incrementApplicationCount, decrementApplicationCount } = require('../services/applicationService');
+const subscriptionService_1 = require("../services/subscriptionService");
+const applicationService_1 = require("../services/applicationService");
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { uploadStudentResume } = require('../services/mediaService');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const emailService = require('../services/emailService');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const notificationService = require('../services/notificationService');
-const { canAccessJob, getUnlockOptions, getQuotaUnlockOptions } = require('../services/zoneAccessService');
-
+const zoneAccessService_1 = require("../services/zoneAccessService");
+const supabase = (0, client_1.getSupabaseClient)();
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isValidUuid = (value) => typeof value === 'string' && UUID_RE.test(value);
+const escapeLike = (value) => value.replace(/[\\%_]/g, (c) => `\\${c}`);
+const getStudentForUser = async (userId) => {
+    const { data: student } = await supabase.from('students').select('*').eq('user_id', userId).maybeSingle();
+    return student;
+};
 // Check if email is taken by another user (excluding current student)
 const isEmailTakenByOther = async (email, currentStudentId) => {
-  const normalizedEmail = email.toLowerCase().trim();
-
-  // Check other students
-  const otherStudent = await Student.exists({
-    email: normalizedEmail,
-    _id: { $ne: currentStudentId }
-  });
-  if (otherStudent) return true;
-
-  // Check companies
-  const companyExists = await Company.exists({ email: normalizedEmail });
-  if (companyExists) return true;
-
-  // Check admin email
-  if (process.env.ADMIN_EMAIL?.toLowerCase() === normalizedEmail) return true;
-
-  return false;
+    const normalizedEmail = email.toLowerCase().trim();
+    const { data: otherStudent } = await supabase
+        .from('students')
+        .select('id')
+        .eq('email', normalizedEmail)
+        .neq('id', currentStudentId)
+        .maybeSingle();
+    if (otherStudent)
+        return true;
+    const { data: company } = await supabase.from('companies').select('id').eq('email', normalizedEmail).maybeSingle();
+    if (company)
+        return true;
+    if (process.env.ADMIN_EMAIL?.toLowerCase() === normalizedEmail)
+        return true;
+    return false;
 };
-
-const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-
 const isValidUrl = (value) => {
-  if (typeof value !== 'string' || value.trim() === '') {
-    return false;
-  }
-
-  try {
-    new URL(value);
-    return true;
-  } catch (error) {
-    return false;
-  }
-};
-
-const sanitizeString = (value, maxLength) => {
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  return trimmed.slice(0, maxLength);
-};
-
-const normalizeYear = (value) => {
-  if (value === null || value === undefined || value === '') {
-    return null;
-  }
-
-  const year = Number(value);
-  const maxYear = new Date().getFullYear() + 6;
-  if (!Number.isInteger(year) || year < 1900 || year > maxYear) {
-    return null;
-  }
-
-  return year;
-};
-
-const normalizeDate = (value) => {
-  if (!value) {
-    return null;
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return null;
-  }
-
-  return date;
-};
-
-const buildProfileResponse = (student) => ({
-  fullName: student.fullName,
-  email: student.email,
-  isDGShipping: student.isDGShipping || 'no',
-  profileLink: student.profileLink || '',
-  bio: student.bio || '',
-  location: student.location || '',
-  availableFrom: student.availableFrom,
-  skills: student.skills || [],
-  education: student.education || [],
-  experience: student.experience || [],
-  resumeUrl: student.resumeUrl || null,
-  introVideoUrl: student.introVideoUrl || '',
-  isHired: student.isHired
-});
-
-const formatInterviewDateTime = (value) => {
-  if (!value) {
-    return null;
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return null;
-  }
-
-  const formatted = new Intl.DateTimeFormat('en-US', {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-    timeZone: 'UTC'
-  }).format(date);
-
-  return `${formatted} UTC`;
-};
-
-const getStudentFacingStatusPayload = (application) => {
-  if (application.status === 'rejected') {
-    if (application.rejectionSource === 'company') {
-      const basePayload = STUDENT_APPLICATION_STATUS_MAP.rejected_company;
-      const normalizedReason = typeof application.rejectionReason === 'string'
-        ? application.rejectionReason.trim()
-        : '';
-
-      if (!normalizedReason) {
-        return basePayload;
-      }
-
-      return {
-        ...basePayload,
-        statusMessage: `${basePayload.statusMessage} Reason: ${normalizedReason}`
-      };
-    }
-
-    return STUDENT_APPLICATION_STATUS_MAP.rejected_admin;
-  }
-
-  if (application.status === 'interview_scheduled') {
-    const basePayload = STUDENT_APPLICATION_STATUS_MAP.interview_scheduled || {
-      studentFacingStatus: 'Interview Scheduled',
-      statusMessage: 'Great news! Check your email for interview details.'
-    };
-    const formattedInterviewDate = formatInterviewDateTime(application.interviewDate);
-
-    if (!formattedInterviewDate) {
-      return basePayload;
-    }
-
-    return {
-      ...basePayload,
-      statusMessage: `${basePayload.statusMessage} Interview time: ${formattedInterviewDate}.`
-    };
-  }
-
-  return STUDENT_APPLICATION_STATUS_MAP[application.status] || {
-    studentFacingStatus: 'Under Review',
-    statusMessage: "Your application is under review. We'll notify you of any updates."
-  };
-};
-
-const buildCompleteness = (student) => {
-  const sections = [
-    {
-      label: 'Bio',
-      filled: Boolean(student.bio && student.bio.trim().length > 0)
-    },
-    {
-      label: 'Location',
-      filled: Boolean(student.location && student.location.trim().length > 0)
-    },
-    {
-      label: 'Skills',
-      filled: Array.isArray(student.skills) && student.skills.length > 0
-    },
-    {
-      label: 'Education',
-      filled: Array.isArray(student.education) && student.education.length > 0
-    },
-    {
-      label: 'Experience',
-      filled: Array.isArray(student.experience) && student.experience.length > 0
-    },
-    {
-      label: 'Resume',
-      filled: Boolean(student.resumeUrl)
-    },
-    {
-      label: 'Intro Video',
-      filled: Boolean(student.introVideoUrl)
-    },
-    {
-      label: 'Available From',
-      filled: Boolean(student.availableFrom)
-    }
-  ];
-
-  const totalSections = 8;
-  const completedSections = sections.filter((section) => section.filled).length;
-  const percentage = Math.round((completedSections / totalSections) * 100);
-  const missingItems = sections
-    .filter((section) => !section.filled)
-    .map((section) => section.label);
-
-  return { percentage, missingItems };
-};
-
-exports.getDashboard = async (req, res) => {
-  try {
-    const student = await Student.findOne({ userId: req.user.userId });
-
-    if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
-    }
-
-    // Get application usage from subscription counter
-    const { applicationsUsed } = await getSubscriptionUsage(student._id);
-
-    // Get pending applications count
-    const pendingApplications = await Application.countDocuments({
-      studentId: student._id,
-      status: 'pending'
-    });
-
-    const applicationLimit = await getApplicationLimit(student._id);
-    const hasUnlimitedApplications = applicationLimit === Infinity;
-
-    res.json({
-      applicationsUsed,
-      applicationLimit: hasUnlimitedApplications ? null : applicationLimit,
-      hasUnlimitedApplications,
-      subscriptionTier: student.subscriptionTier,
-      pendingApplications,
-      isHired: student.isHired
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-const getCurrentPlanDetails = async (student) => {
-  if (!student) {
-    return {
-      currentPlan: null,
-      currentPlanLimit: null,
-      currentPlanStartDate: null
-    };
-  }
-
-  let subscription = null;
-
-  // For quota-based subscriptions, always use the student's current subscription
-  // The quota limit check (applicationsUsed vs maxApplications) determines access, not the status
-  if (student.currentSubscriptionId) {
-    subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
-      .populate('serviceId', 'name tier maxApplications')
-      .lean();
-  }
-
-  // Use maxApplications from subscription (snapshot at purchase time) if available,
-  // otherwise fall back to the service's current maxApplications
-  const planLimit = subscription?.maxApplications ?? subscription?.serviceId?.maxApplications;
-  const currentPlan = subscription?.serviceId?.name || (student.subscriptionTier === 'free' ? 'Free Tier' : null);
-
-  if (typeof planLimit === 'number') {
-    return {
-      currentPlan,
-      currentPlanLimit: planLimit,
-      currentPlanStartDate: subscription?.startDate || null
-    };
-  }
-
-  if (subscription?.serviceId?.tier === 'free' || student.subscriptionTier === 'free') {
-    const freePlan = await AvailableService.findOne({ tier: 'free', isActive: true })
-      .sort({ createdAt: 1 })
-      .select('name maxApplications')
-      .lean();
-
-    return {
-      currentPlan: freePlan?.name || currentPlan,
-      currentPlanLimit: typeof freePlan?.maxApplications === 'number' ? freePlan.maxApplications : null,
-      currentPlanStartDate: subscription?.startDate || null
-    };
-  }
-
-  return {
-    currentPlan,
-    currentPlanLimit: null,
-    currentPlanStartDate: subscription?.startDate || null
-  };
-};
-
-
-exports.getJobs = async (req, res) => {
-  try {
-    const { search, location, jobType, page = 1, limit = 10 } = req.query;
-
-    const query = { status: 'approved' };
-
-    if (search) {
-      const escapedSearch = escapeRegex(search);
-      query.$or = [
-        { title: { $regex: escapedSearch, $options: 'i' } },
-        { description: { $regex: escapedSearch, $options: 'i' } }
-      ];
-    }
-
-    if (location) {
-      const escapedLocation = escapeRegex(location);
-      query.location = { $regex: escapedLocation, $options: 'i' };
-    }
-
-    if (jobType) {
-      query.jobType = jobType;
-    }
-
-    const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 10));
-    const skip = (pageNum - 1) * limitNum;
-
-    const [jobs, total] = await Promise.all([
-      JobPosting.find(query)
-        .populate('companyId', 'name logo industry size website')
-        .populate('countryId', 'zoneId countryName')
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limitNum)
-        .select('-rejectionReason -approvedAt -status'),
-      JobPosting.countDocuments(query)
-    ]);
-
-    const transformedJobs = jobs.map(job => {
-      const jobObj = job.toObject();
-      return {
-        id: jobObj._id,
-        title: jobObj.title,
-        description: jobObj.description,
-        requirements: jobObj.requirements,
-        location: jobObj.location,
-        jobType: jobObj.jobType,
-        salaryRange: jobObj.salaryRange,
-        deadline: jobObj.deadline,
-        createdAt: jobObj.createdAt,
-        countryId: jobObj.countryId?._id || null,
-        countryName: jobObj.countryId?.countryName || null,
-        zoneId: jobObj.countryId?.zoneId || null,
-        company: jobObj.companyId ? {
-          id: jobObj.companyId._id,
-          name: jobObj.companyId.name,
-          logo: jobObj.companyId.logo,
-          industry: jobObj.companyId.industry,
-          size: jobObj.companyId.size,
-          website: jobObj.companyId.website
-        } : null
-      };
-    });
-
-    // After transformedJobs is created, add zone lock status
-    let jobsWithZoneStatus = transformedJobs;
-
-    if (req.user && req.user.userType === 'student') {
-      try {
-        const student = await Student.findOne({ userId: req.user.userId });
-        if (student) {
-          // Batch fetch: get student's accessible zones once
-          const { getAccessibleZones } = require('../services/zoneAccessService');
-          const accessibleZones = await getAccessibleZones(student._id);
-
-          // Batch fetch: get all pay-per-job purchases for this student
-          const PayPerJobPurchase = require('../models/PayPerJobPurchase');
-          const paidJobIds = await PayPerJobPurchase.find({
-            studentId: student._id,
-            status: 'completed'
-          }).distinct('jobPostingId');
-          const paidJobIdSet = new Set(paidJobIds.map(id => id.toString()));
-
-          // Batch fetch: get all applications with status for this student
-          const applications = await Application.find({
-            studentId: student._id
-          }).select('jobPostingId status').lean();
-          const applicationMap = new Map(
-            applications.map(app => [app.jobPostingId.toString(), app.status])
-          );
-
-          // Batch fetch: all zones for zoneLockReason
-          const allZones = await Zone.find().select('name').lean();
-          const zoneMap = new Map(allZones.map(z => [z._id.toString(), z.name]));
-
-          // Check each job against cached data (no additional queries)
-          jobsWithZoneStatus = transformedJobs.map(job => {
-            const jobIdStr = job.id.toString();
-            const applicationStatus = applicationMap.get(jobIdStr) || null;
-            const hasApplied = applicationStatus !== null;
-
-            // If already applied, not locked (they already have access)
-            if (hasApplied) {
-              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'applied', hasApplied: true, applicationStatus };
-            }
-
-            // If pay-per-job purchased, not locked
-            if (paidJobIdSet.has(jobIdStr)) {
-              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'pay-per-job', hasApplied: false, applicationStatus: null };
-            }
-
-            // If job has no countryId/zoneId, not locked
-            if (!job.zoneId) {
-              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'no-zone-restriction', hasApplied: false, applicationStatus: null };
-            }
-
-            // If student has all zones access, not locked
-            if (accessibleZones.allZones) {
-              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'all-zones', hasApplied: false, applicationStatus: null };
-            }
-
-            // Check if job's zone is in student's accessible zones
-            const jobZoneId = job.zoneId?.toString();
-            const hasAccess = jobZoneId && accessibleZones.zoneIds.some(
-              zId => zId.toString() === jobZoneId
-            );
-
-            if (hasAccess) {
-              return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'subscription', hasApplied: false, applicationStatus: null };
-            }
-
-            // Locked - include zone info
-            return {
-              ...job,
-              isZoneLocked: true,
-              zoneLockReason: {
-                zoneId: jobZoneId,
-                zoneName: zoneMap.get(jobZoneId) || 'Unknown Zone'
-              },
-              accessSource: null,
-              hasApplied: false,
-              applicationStatus: null
-            };
-          });
-        }
-      } catch (zoneError) {
-        console.error('Zone access check failed for job list:', zoneError);
-        // Graceful degradation: return jobs without zone lock info
-      }
-    }
-
-    res.json({
-      jobs: jobsWithZoneStatus,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        totalPages: Math.ceil(total / limitNum)
-      }
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.getJob = async (req, res) => {
-  try {
-    const { jobId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(jobId)) {
-      return res.status(400).json({ error: 'Invalid job ID format' });
-    }
-
-    let hasApplied = false;
-    let applicationStatus = null;
-    let student = null;
-    let isDescriptionLocked = false;
-    let applicationsUsed = 0;
-    let applicationLimit = null;
-
-    // Check if student has applied to this job
-    if (req.user && req.user.userType === 'student') {
-      student = await Student.findOne({ userId: req.user.userId });
-      if (student) {
-        const [application, totalApplicationLimit, usage] = await Promise.all([
-          Application.findOne({
-            studentId: student._id,
-            jobPostingId: jobId
-          }),
-          getApplicationLimit(student._id),
-          getSubscriptionUsage(student._id)
-        ]);
-
-        applicationsUsed = usage.applicationsUsed;
-        // Use getApplicationLimit which includes base + stacked + addon credits
-        applicationLimit = totalApplicationLimit === Infinity ? null : totalApplicationLimit;
-        const isLimitReached = typeof applicationLimit === 'number' && applicationsUsed >= applicationLimit;
-
-        if (application) {
-          hasApplied = true;
-          applicationStatus = application.status;
-        }
-
-        // Only lock description if quota is exhausted AND student hasn't applied
-        // Students who have already applied should always see the job details
-        if (isLimitReached && !hasApplied) {
-          isDescriptionLocked = true;
-        }
-      }
-    }
-
-    // Zone access check - always run (even when quota exhausted) to show unlock options
-    let isZoneLocked = false;
-    let zoneLockReason = null;
-    let accessSource = null; // 'subscription' | 'pay-per-job' | 'all-zones' | 'applied' | null
-    let quotaLockReason = null;
-
-    // Get quota unlock options when quota is exhausted
-    if (student && isDescriptionLocked) {
-      try {
-        const quotaUnlockOptions = await getQuotaUnlockOptions(student._id);
-        quotaLockReason = {
-          applicationsUsed,
-          applicationLimit,
-          unlockOptions: quotaUnlockOptions
-        };
-      } catch (quotaError) {
-        console.error('Quota unlock options failed:', quotaError);
-      }
-    }
-
-    if (student) {
-      if (hasApplied) {
-        // Already applied - they have access
-        accessSource = 'applied';
-      } else {
-        try {
-          const zoneAccess = await canAccessJob(student._id, jobId);
-          if (zoneAccess.canAccess) {
-            // Map the source from zoneAccessService to frontend-friendly values
-            accessSource = zoneAccess.source; // 'pay-per-job', 'subscription', 'all-zones', 'no-zone-restriction'
-          } else {
-            isZoneLocked = true;
-            const unlockOptions = await getUnlockOptions(zoneAccess.requiredZoneId, student._id);
-            zoneLockReason = {
-              zone: {
-                id: zoneAccess.requiredZoneId,
-                name: zoneAccess.zoneName
-              },
-              unlockOptions
-            };
-          }
-        } catch (zoneError) {
-          console.error('Zone access check failed:', zoneError);
-          // Graceful degradation: if zone check fails, allow access
-        }
-      }
-    }
-
-    // Combine quota lock and zone lock
-    const isLocked = isDescriptionLocked || isZoneLocked;
-
-    // Build query - applied students can view any job, others only approved
-    const query = { _id: jobId };
-    if (!hasApplied) {
-      query.status = 'approved';
-    }
-
-    const job = await JobPosting.findOne(query)
-      .populate('companyId', 'name logo description industry size website socialLinks foundedYear')
-      .populate('countryId', 'zoneId countryName')
-      .select('-rejectionReason -approvedAt');
-
-    if (!job) {
-      return res.status(404).json({ error: 'Job not found' });
-    }
-
-    const jobObj = job.toObject();
-
-    // Get zone name if available
-    let zoneName = null;
-    if (jobObj.countryId?.zoneId) {
-      const zone = await Zone.findById(jobObj.countryId.zoneId).select('name').lean();
-      zoneName = zone?.name || null;
-    }
-
-    res.json({
-      id: jobObj._id,
-      title: jobObj.title,
-      description: isLocked ? null : jobObj.description,
-      requirements: isLocked ? null : jobObj.requirements,
-      location: jobObj.location,
-      jobType: jobObj.jobType,
-      salaryRange: jobObj.salaryRange,
-      deadline: jobObj.deadline,
-      status: jobObj.status,
-      createdAt: jobObj.createdAt,
-      countryId: jobObj.countryId?._id || null,
-      countryName: jobObj.countryId?.countryName || null,
-      zoneId: jobObj.countryId?.zoneId || null,
-      zoneName,
-      company: jobObj.companyId ? {
-        id: jobObj.companyId._id,
-        name: jobObj.companyId.name,
-        logo: jobObj.companyId.logo,
-        description: jobObj.companyId.description,
-        industry: jobObj.companyId.industry,
-        size: jobObj.companyId.size,
-        website: jobObj.companyId.website,
-        socialLinks: {
-          linkedin: jobObj.companyId.socialLinks?.linkedin || null,
-          twitter: jobObj.companyId.socialLinks?.twitter || null
-        },
-        foundedYear: jobObj.companyId.foundedYear
-      } : null,
-      isDescriptionLocked: isLocked,
-      isQuotaExhausted: isDescriptionLocked,
-      quotaLockReason,
-      isZoneLocked,
-      zoneLockReason,
-      accessSource,
-      hasApplied,
-      applicationStatus
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.applyToJob = async (req, res) => {
-  try {
-    const { jobId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(jobId)) {
-      return res.status(400).json({ error: 'Invalid job ID format' });
-    }
-
-    const student = await Student.findOne({ userId: req.user.userId });
-
-    if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
-    }
-
-    if (student.isHired) {
-      return res.status(403).json({
-        error: 'Hired students cannot apply to new jobs.'
-      });
-    }
-
-    const [totalApplicationLimit, usage] = await Promise.all([
-      getApplicationLimit(student._id),
-      getSubscriptionUsage(student._id)
-    ]);
-    const applicationLimit = totalApplicationLimit === Infinity ? null : totalApplicationLimit;
-
-    // Determine the authoritative applicationsUsed value:
-    //   • Free-tier (with or without a subscription document): count raw Application
-    //     documents because the subscription counter is never incremented for free users.
-    //   • Paid-tier: use the subscription's applicationsUsed counter, which is the source
-    //     of truth and correctly excludes withdrawn applications.
-    let applicationsUsed;
-    if (student.subscriptionTier === 'free') {
-      applicationsUsed = await Application.countDocuments({ studentId: student._id });
-    } else {
-      applicationsUsed = usage.applicationsUsed;
-    }
-
-    // [MANDATORY LOG] — matches spec format
-    console.log('[applyToJob]', {
-      studentId: student._id,
-      applicationsUsed,
-      applicationLimit,
-      currentSubscriptionId: student.currentSubscriptionId
-    });
-
-    const isLimitReached = typeof applicationLimit === 'number' && applicationsUsed >= applicationLimit;
-
-    if (isLimitReached) {
-      const quotaUnlockOptions = await getQuotaUnlockOptions(student._id);
-      return res.status(403).json({
-        error: 'Application limit reached. Please upgrade your plan to apply to more jobs.',
-        isQuotaExhausted: true,
-        applicationsUsed,
-        applicationLimit,
-        unlockOptions: quotaUnlockOptions
-      });
-    }
-
-    // Zone access check
+    if (typeof value !== 'string' || value.trim() === '')
+        return false;
     try {
-      const zoneAccess = await canAccessJob(student._id, jobId);
-      if (!zoneAccess.canAccess) {
-        const unlockOptions = await getUnlockOptions(zoneAccess.requiredZoneId, student._id);
-        return res.status(403).json({
-          error: 'This job is in a zone not included in your plan.',
-          isZoneLocked: true,
-          zoneLockReason: {
-            zone: {
-              id: zoneAccess.requiredZoneId,
-              name: zoneAccess.zoneName
-            },
-            unlockOptions
-          }
+        new URL(value);
+        return true;
+    }
+    catch {
+        return false;
+    }
+};
+const sanitizeString = (value, maxLength) => {
+    if (typeof value !== 'string')
+        return null;
+    const trimmed = value.trim();
+    if (!trimmed)
+        return null;
+    return trimmed.slice(0, maxLength);
+};
+const normalizeYear = (value) => {
+    if (value === null || value === undefined || value === '')
+        return null;
+    const year = Number(value);
+    const maxYear = new Date().getFullYear() + 6;
+    if (!Number.isInteger(year) || year < 1900 || year > maxYear)
+        return null;
+    return year;
+};
+const normalizeDate = (value) => {
+    if (!value)
+        return null;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime()))
+        return null;
+    return date;
+};
+const buildProfileResponse = (student) => ({
+    fullName: student.full_name,
+    email: student.email,
+    isDGShipping: student.is_dg_shipping || 'no',
+    profileLink: student.profile_link || '',
+    bio: student.bio || '',
+    location: student.location || '',
+    availableFrom: student.available_from,
+    skills: student.skills || [],
+    education: student.education || [],
+    experience: student.experience || [],
+    resumeUrl: student.resume_url || null,
+    introVideoUrl: student.intro_video_url || '',
+    isHired: student.is_hired
+});
+const formatInterviewDateTime = (value) => {
+    if (!value)
+        return null;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime()))
+        return null;
+    const formatted = new Intl.DateTimeFormat('en-US', {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+        timeZone: 'UTC'
+    }).format(date);
+    return `${formatted} UTC`;
+};
+const getStudentFacingStatusPayload = (application) => {
+    if (application.status === 'rejected') {
+        if (application.rejection_source === 'company') {
+            const basePayload = STUDENT_APPLICATION_STATUS_MAP.rejected_company;
+            const normalizedReason = typeof application.rejection_reason === 'string' ? application.rejection_reason.trim() : '';
+            if (!normalizedReason)
+                return basePayload;
+            return { ...basePayload, statusMessage: `${basePayload.statusMessage} Reason: ${normalizedReason}` };
+        }
+        return STUDENT_APPLICATION_STATUS_MAP.rejected_admin;
+    }
+    if (application.status === 'interview_scheduled') {
+        const basePayload = STUDENT_APPLICATION_STATUS_MAP.interview_scheduled || {
+            studentFacingStatus: 'Interview Scheduled',
+            statusMessage: 'Great news! Check your email for interview details.'
+        };
+        const formattedInterviewDate = formatInterviewDateTime(application.interview_date);
+        if (!formattedInterviewDate)
+            return basePayload;
+        return { ...basePayload, statusMessage: `${basePayload.statusMessage} Interview time: ${formattedInterviewDate}.` };
+    }
+    return (STUDENT_APPLICATION_STATUS_MAP[application.status] || {
+        studentFacingStatus: 'Under Review',
+        statusMessage: "Your application is under review. We'll notify you of any updates."
+    });
+};
+const buildCompleteness = (student) => {
+    const sections = [
+        { label: 'Bio', filled: Boolean(student.bio && student.bio.trim().length > 0) },
+        { label: 'Location', filled: Boolean(student.location && student.location.trim().length > 0) },
+        { label: 'Skills', filled: Array.isArray(student.skills) && student.skills.length > 0 },
+        { label: 'Education', filled: Array.isArray(student.education) && student.education.length > 0 },
+        { label: 'Experience', filled: Array.isArray(student.experience) && student.experience.length > 0 },
+        { label: 'Resume', filled: Boolean(student.resume_url) },
+        { label: 'Intro Video', filled: Boolean(student.intro_video_url) },
+        { label: 'Available From', filled: Boolean(student.available_from) }
+    ];
+    const totalSections = 8;
+    const completedSections = sections.filter((s) => s.filled).length;
+    const percentage = Math.round((completedSections / totalSections) * 100);
+    const missingItems = sections.filter((s) => !s.filled).map((s) => s.label);
+    return { percentage, missingItems };
+};
+exports.getDashboard = async (req, res) => {
+    try {
+        const student = await getStudentForUser(req.user.userId);
+        if (!student)
+            return res.status(404).json({ error: 'Student not found' });
+        const { applicationsUsed } = await (0, applicationService_1.getSubscriptionUsage)(student.id);
+        const { count: pendingApplications } = await supabase
+            .from('applications')
+            .select('*', { count: 'exact', head: true })
+            .eq('student_id', student.id)
+            .eq('status', 'pending');
+        const applicationLimit = await (0, subscriptionService_1.getApplicationLimit)(student.id);
+        const hasUnlimitedApplications = applicationLimit === Infinity;
+        res.json({
+            applicationsUsed,
+            applicationLimit: hasUnlimitedApplications ? null : applicationLimit,
+            hasUnlimitedApplications,
+            subscriptionTier: student.subscription_tier,
+            pendingApplications: pendingApplications ?? 0,
+            isHired: student.is_hired
         });
-      }
-    } catch (zoneError) {
-      console.error('Zone access check failed in applyToJob:', zoneError);
-      // If zone check fails, allow the application to proceed (graceful degradation)
     }
-
-    const existingApp = await Application.findOne({
-      studentId: student._id,
-      jobPostingId: jobId
-    });
-
-    if (existingApp && existingApp.status !== 'withdrawn') {
-      return res.status(400).json({ error: 'You have already applied to this job' });
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
     }
-
-    const job = await JobPosting.findOne({ _id: jobId, status: 'approved' });
-
-    if (!job) {
-      return res.status(404).json({ error: 'Job not found' });
-    }
-
-    let application;
-
-    if (existingApp && existingApp.status === 'withdrawn') {
-      // Reapply by resetting the withdrawn application
-      application = await Application.findByIdAndUpdate(
-        existingApp._id,
-        {
-          $set: {
-            status: 'pending',
-            rejectionReason: null,
-            reviewedAt: null,
-            createdAt: new Date()
-          }
-        },
-        { returnDocument: 'after' }
-      );
-    } else {
-      application = await Application.create({
-        studentId: student._id,
-        jobPostingId: jobId,
-        status: 'pending'
-      });
-    }
-
-    // Increment application count on subscription
-    await incrementApplicationCount(student._id);
-
-    const populatedApp = await Application.findById(application._id)
-      .populate({
-        path: 'jobPostingId',
-        select: 'title',
-        populate: { path: 'companyId', select: 'name userId' }
-      });
-
-    res.status(201).json(populatedApp);
-
-    const _jobTitle = populatedApp.jobPostingId.title;
-    const _companyName = populatedApp.jobPostingId.companyId?.name;
-    const _companyUserId = populatedApp.jobPostingId.companyId?.userId;
-
-    console.log("STEP A: About to call notifyApplicationSubmitted");
-
-    notificationService
-      .notifyApplicationSubmitted(student.userId, {
-        jobTitle: _jobTitle,
-        companyName: _companyName
-      })
-      .catch((err) => console.error('Notification error (submitted):', err));
-
-    // Notify admins about the new application
-    notificationService
-      .notifyAdminsNewApplication({
-        studentName: student.fullName,
-        jobTitle: _jobTitle,
-        applicationId: application._id.toString()
-      })
-      .catch((err) => console.error('Notification error (admin new application):', err));
-
-    emailService
-      .sendApplicationStatusEmail(
-        student.email,
-        {
-          status: 'submitted',
-          jobTitle: populatedApp.jobPostingId.title,
-          companyName: populatedApp.jobPostingId.companyId?.name,
-          studentName: student.fullName
-        },
-        { userId: student.userId }
-      )
-      .catch((error) => {
-        console.error('Failed to send application submission email', error);
-      });
-
-    return;
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
 };
-
+exports.getJobs = async (req, res) => {
+    try {
+        const { search, location, jobType, page = 1, limit = 10 } = req.query;
+        let query = supabase
+            .from('job_postings')
+            .select('id, title, description, requirements, location, job_type, salary_range, deadline, created_at, country_id, companies ( id, name, logo, industry, size, website ), zone_countries ( id, country_name, zone_id )', { count: 'exact' })
+            .eq('status', 'approved');
+        if (jobType)
+            query = query.eq('job_type', jobType);
+        if (location)
+            query = query.ilike('location', `%${escapeLike(location)}%`);
+        if (search) {
+            const escaped = escapeLike(search);
+            query = query.or(`title.ilike.%${escaped}%,description.ilike.%${escaped}%`);
+        }
+        const pageNum = Math.max(1, parseInt(page) || 1);
+        const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 10));
+        const from = (pageNum - 1) * limitNum;
+        const to = from + limitNum - 1;
+        const { data: jobs, count, error } = await query.order('created_at', { ascending: false }).range(from, to);
+        if (error)
+            throw error;
+        const transformedJobs = (jobs || []).map((job) => ({
+            id: job.id,
+            title: job.title,
+            description: job.description,
+            requirements: job.requirements,
+            location: job.location,
+            jobType: job.job_type,
+            salaryRange: job.salary_range,
+            deadline: job.deadline,
+            createdAt: job.created_at,
+            countryId: job.zone_countries?.id || null,
+            countryName: job.zone_countries?.country_name || null,
+            zoneId: job.zone_countries?.zone_id || null,
+            company: job.companies
+                ? {
+                    id: job.companies.id,
+                    name: job.companies.name,
+                    logo: job.companies.logo,
+                    industry: job.companies.industry,
+                    size: job.companies.size,
+                    website: job.companies.website
+                }
+                : null
+        }));
+        let jobsWithZoneStatus = transformedJobs;
+        if (req.user && req.user.userType === 'student') {
+            try {
+                const student = await getStudentForUser(req.user.userId);
+                if (student) {
+                    const accessibleZones = await (0, zoneAccessService_1.getAccessibleZones)(student.id);
+                    const { data: purchases } = await supabase
+                        .from('pay_per_job_purchases')
+                        .select('job_posting_id')
+                        .eq('student_id', student.id)
+                        .eq('status', 'completed');
+                    const paidJobIdSet = new Set((purchases || []).map((p) => p.job_posting_id));
+                    const { data: applications } = await supabase.from('applications').select('job_posting_id, status').eq('student_id', student.id);
+                    const applicationMap = new Map((applications || []).map((a) => [a.job_posting_id, a.status]));
+                    const { data: allZones } = await supabase.from('zones').select('id, name');
+                    const zoneMap = new Map((allZones || []).map((z) => [z.id, z.name]));
+                    jobsWithZoneStatus = transformedJobs.map((job) => {
+                        const applicationStatus = applicationMap.get(job.id) || null;
+                        const hasApplied = applicationStatus !== null;
+                        if (hasApplied) {
+                            return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'applied', hasApplied: true, applicationStatus };
+                        }
+                        if (paidJobIdSet.has(job.id)) {
+                            return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'pay-per-job', hasApplied: false, applicationStatus: null };
+                        }
+                        if (!job.zoneId) {
+                            return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'no-zone-restriction', hasApplied: false, applicationStatus: null };
+                        }
+                        if (accessibleZones.allZones) {
+                            return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'all-zones', hasApplied: false, applicationStatus: null };
+                        }
+                        const hasAccess = accessibleZones.zoneIds.includes(job.zoneId);
+                        if (hasAccess) {
+                            return { ...job, isZoneLocked: false, zoneLockReason: null, accessSource: 'subscription', hasApplied: false, applicationStatus: null };
+                        }
+                        return {
+                            ...job,
+                            isZoneLocked: true,
+                            zoneLockReason: { zoneId: job.zoneId, zoneName: zoneMap.get(job.zoneId) || 'Unknown Zone' },
+                            accessSource: null,
+                            hasApplied: false,
+                            applicationStatus: null
+                        };
+                    });
+                }
+            }
+            catch (zoneError) {
+                console.error('Zone access check failed for job list:', zoneError);
+            }
+        }
+        res.json({
+            jobs: jobsWithZoneStatus,
+            pagination: { page: pageNum, limit: limitNum, total: count ?? 0, totalPages: Math.ceil((count ?? 0) / limitNum) }
+        });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.getJob = async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        if (!isValidUuid(jobId)) {
+            return res.status(400).json({ error: 'Invalid job ID format' });
+        }
+        let hasApplied = false;
+        let applicationStatus = null;
+        let student = null;
+        let isDescriptionLocked = false;
+        let applicationsUsed = 0;
+        let applicationLimit = null;
+        if (req.user && req.user.userType === 'student') {
+            student = await getStudentForUser(req.user.userId);
+            if (student) {
+                const [{ data: application }, totalApplicationLimit, usage] = await Promise.all([
+                    supabase.from('applications').select('*').eq('student_id', student.id).eq('job_posting_id', jobId).maybeSingle(),
+                    (0, subscriptionService_1.getApplicationLimit)(student.id),
+                    (0, applicationService_1.getSubscriptionUsage)(student.id)
+                ]);
+                applicationsUsed = usage.applicationsUsed;
+                applicationLimit = totalApplicationLimit === Infinity ? null : totalApplicationLimit;
+                const isLimitReached = typeof applicationLimit === 'number' && applicationsUsed >= applicationLimit;
+                if (application) {
+                    hasApplied = true;
+                    applicationStatus = application.status;
+                }
+                if (isLimitReached && !hasApplied) {
+                    isDescriptionLocked = true;
+                }
+            }
+        }
+        let isZoneLocked = false;
+        let zoneLockReason = null;
+        let accessSource = null;
+        let quotaLockReason = null;
+        if (student && isDescriptionLocked) {
+            try {
+                const quotaUnlockOptions = await (0, zoneAccessService_1.getQuotaUnlockOptions)(student.id);
+                quotaLockReason = { applicationsUsed, applicationLimit, unlockOptions: quotaUnlockOptions };
+            }
+            catch (quotaError) {
+                console.error('Quota unlock options failed:', quotaError);
+            }
+        }
+        if (student) {
+            if (hasApplied) {
+                accessSource = 'applied';
+            }
+            else {
+                try {
+                    const zoneAccess = await (0, zoneAccessService_1.canAccessJob)(student.id, jobId);
+                    if (zoneAccess.canAccess) {
+                        accessSource = zoneAccess.source;
+                    }
+                    else {
+                        isZoneLocked = true;
+                        const unlockOptions = await (0, zoneAccessService_1.getUnlockOptions)(zoneAccess.requiredZoneId, student.id);
+                        zoneLockReason = { zone: { id: zoneAccess.requiredZoneId, name: zoneAccess.zoneName }, unlockOptions };
+                    }
+                }
+                catch (zoneError) {
+                    console.error('Zone access check failed:', zoneError);
+                }
+            }
+        }
+        const isLocked = isDescriptionLocked || isZoneLocked;
+        let jobQuery = supabase.from('job_postings').select('*, companies ( id, name, logo, description, industry, size, website, social_linkedin, social_twitter, founded_year ), zone_countries ( id, country_name, zone_id )').eq('id', jobId);
+        if (!hasApplied) {
+            jobQuery = jobQuery.eq('status', 'approved');
+        }
+        const { data: job } = await jobQuery.maybeSingle();
+        if (!job) {
+            return res.status(404).json({ error: 'Job not found' });
+        }
+        let zoneName = null;
+        if (job.zone_countries?.zone_id) {
+            const { data: zone } = await supabase.from('zones').select('name').eq('id', job.zone_countries.zone_id).maybeSingle();
+            zoneName = zone?.name || null;
+        }
+        const company = job.companies;
+        res.json({
+            id: job.id,
+            title: job.title,
+            description: isLocked ? null : job.description,
+            requirements: isLocked ? null : job.requirements,
+            location: job.location,
+            jobType: job.job_type,
+            salaryRange: job.salary_range,
+            deadline: job.deadline,
+            status: job.status,
+            createdAt: job.created_at,
+            countryId: job.zone_countries?.id || null,
+            countryName: job.zone_countries?.country_name || null,
+            zoneId: job.zone_countries?.zone_id || null,
+            zoneName,
+            company: company
+                ? {
+                    id: company.id,
+                    name: company.name,
+                    logo: company.logo,
+                    description: company.description,
+                    industry: company.industry,
+                    size: company.size,
+                    website: company.website,
+                    socialLinks: { linkedin: company.social_linkedin || null, twitter: company.social_twitter || null },
+                    foundedYear: company.founded_year
+                }
+                : null,
+            isDescriptionLocked: isLocked,
+            isQuotaExhausted: isDescriptionLocked,
+            quotaLockReason,
+            isZoneLocked,
+            zoneLockReason,
+            accessSource,
+            hasApplied,
+            applicationStatus
+        });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.applyToJob = async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        if (!isValidUuid(jobId)) {
+            return res.status(400).json({ error: 'Invalid job ID format' });
+        }
+        const student = await getStudentForUser(req.user.userId);
+        if (!student)
+            return res.status(404).json({ error: 'Student not found' });
+        if (student.is_hired) {
+            return res.status(403).json({ error: 'Hired students cannot apply to new jobs.' });
+        }
+        const [totalApplicationLimit, usage] = await Promise.all([(0, subscriptionService_1.getApplicationLimit)(student.id), (0, applicationService_1.getSubscriptionUsage)(student.id)]);
+        const applicationLimit = totalApplicationLimit === Infinity ? null : totalApplicationLimit;
+        let applicationsUsed;
+        if (student.subscription_tier === 'free') {
+            const { count } = await supabase.from('applications').select('*', { count: 'exact', head: true }).eq('student_id', student.id);
+            applicationsUsed = count ?? 0;
+        }
+        else {
+            applicationsUsed = usage.applicationsUsed;
+        }
+        console.log('[applyToJob]', {
+            studentId: student.id,
+            applicationsUsed,
+            applicationLimit,
+            currentSubscriptionId: student.current_subscription_id
+        });
+        const isLimitReached = typeof applicationLimit === 'number' && applicationsUsed >= applicationLimit;
+        if (isLimitReached) {
+            const quotaUnlockOptions = await (0, zoneAccessService_1.getQuotaUnlockOptions)(student.id);
+            return res.status(403).json({
+                error: 'Application limit reached. Please upgrade your plan to apply to more jobs.',
+                isQuotaExhausted: true,
+                applicationsUsed,
+                applicationLimit,
+                unlockOptions: quotaUnlockOptions
+            });
+        }
+        try {
+            const zoneAccess = await (0, zoneAccessService_1.canAccessJob)(student.id, jobId);
+            if (!zoneAccess.canAccess) {
+                const unlockOptions = await (0, zoneAccessService_1.getUnlockOptions)(zoneAccess.requiredZoneId, student.id);
+                return res.status(403).json({
+                    error: 'This job is in a zone not included in your plan.',
+                    isZoneLocked: true,
+                    zoneLockReason: { zone: { id: zoneAccess.requiredZoneId, name: zoneAccess.zoneName }, unlockOptions }
+                });
+            }
+        }
+        catch (zoneError) {
+            console.error('Zone access check failed in applyToJob:', zoneError);
+        }
+        const { data: existingApp } = await supabase
+            .from('applications')
+            .select('*')
+            .eq('student_id', student.id)
+            .eq('job_posting_id', jobId)
+            .maybeSingle();
+        if (existingApp && existingApp.status !== 'withdrawn') {
+            return res.status(400).json({ error: 'You have already applied to this job' });
+        }
+        const { data: job } = await supabase.from('job_postings').select('id, title, company_id').eq('id', jobId).eq('status', 'approved').maybeSingle();
+        if (!job) {
+            return res.status(404).json({ error: 'Job not found' });
+        }
+        let application;
+        if (existingApp && existingApp.status === 'withdrawn') {
+            const { data: updated, error } = await supabase
+                .from('applications')
+                .update({ status: 'pending', rejection_reason: null, reviewed_at: null, created_at: new Date().toISOString() })
+                .eq('id', existingApp.id)
+                .select()
+                .single();
+            if (error)
+                throw error;
+            application = updated;
+        }
+        else {
+            const { data: created, error } = await supabase
+                .from('applications')
+                .insert({ student_id: student.id, job_posting_id: jobId, status: 'pending' })
+                .select()
+                .single();
+            if (error)
+                throw error;
+            application = created;
+        }
+        await (0, applicationService_1.incrementApplicationCount)(student.id);
+        const { data: company } = await supabase.from('companies').select('name, user_id').eq('id', job.company_id).maybeSingle();
+        res.status(201).json({ ...application, jobPosting: { id: job.id, title: job.title, company } });
+        const jobTitle = job.title;
+        const companyName = company?.name;
+        notificationService
+            .notifyApplicationSubmitted(student.user_id, { jobTitle, companyName })
+            .catch((err) => console.error('Notification error (submitted):', err));
+        notificationService
+            .notifyAdminsNewApplication({ studentName: student.full_name, jobTitle, applicationId: application.id })
+            .catch((err) => console.error('Notification error (admin new application):', err));
+        emailService
+            .sendApplicationStatusEmail(student.email, { status: 'submitted', jobTitle, companyName, studentName: student.full_name }, { userId: student.user_id })
+            .catch((error) => console.error('Failed to send application submission email', error));
+        return;
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
 exports.getApplications = async (req, res) => {
-  try {
-    const student = await Student.findOne({ userId: req.user.userId });
-
-    if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
+    try {
+        const student = await getStudentForUser(req.user.userId);
+        if (!student)
+            return res.status(404).json({ error: 'Student not found' });
+        const { data: applications, error } = await supabase
+            .from('applications')
+            .select('*, job_postings ( title, location, job_type, companies ( name ) )')
+            .eq('student_id', student.id)
+            .order('created_at', { ascending: false });
+        if (error)
+            throw error;
+        const shapedApplications = (applications || []).map((application) => {
+            const { studentFacingStatus, statusMessage } = getStudentFacingStatusPayload(application);
+            const jobPosting = application.job_postings;
+            const responseApplication = {
+                ...application,
+                jobPostingId: jobPosting
+                    ? { id: application.job_posting_id, title: jobPosting.title, location: jobPosting.location, jobType: jobPosting.job_type, companyId: jobPosting.companies }
+                    : application.job_posting_id,
+                studentFacingStatus,
+                statusMessage
+            };
+            delete responseApplication.job_postings;
+            if (application.status === 'rejected' && application.rejection_source !== 'company') {
+                responseApplication.rejection_reason = null;
+            }
+            return responseApplication;
+        });
+        res.json({ applications: shapedApplications });
     }
-
-    const applications = await Application.find({ studentId: student._id })
-      .populate({
-        path: 'jobPostingId',
-        select: 'title location jobType',
-        populate: { path: 'companyId', select: 'name' }
-      })
-      .sort({ createdAt: -1 })
-      .lean();
-
-    const shapedApplications = applications.map((application) => {
-      const { studentFacingStatus, statusMessage } = getStudentFacingStatusPayload(application);
-      const responseApplication = {
-        ...application,
-        studentFacingStatus,
-        statusMessage
-      };
-
-      if (application.status === 'rejected' && application.rejectionSource !== 'company') {
-        responseApplication.rejectionReason = null;
-      }
-
-      return responseApplication;
-    });
-
-    res.json({ applications: shapedApplications });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
 };
-
 exports.withdrawApplication = async (req, res) => {
-  try {
-    const { appId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(appId)) {
-      return res.status(400).json({ error: 'Invalid application ID format' });
+    try {
+        const { appId } = req.params;
+        if (!isValidUuid(appId)) {
+            return res.status(400).json({ error: 'Invalid application ID format' });
+        }
+        const student = await getStudentForUser(req.user.userId);
+        if (!student)
+            return res.status(404).json({ error: 'Student not found' });
+        const { data: application } = await supabase.from('applications').select('*').eq('id', appId).maybeSingle();
+        if (!application)
+            return res.status(404).json({ error: 'Application not found' });
+        if (application.student_id !== student.id) {
+            return res.status(403).json({ error: 'You can only withdraw your own applications' });
+        }
+        if (application.status !== 'pending') {
+            const messages = {
+                reviewed: 'Cannot withdraw after admin has approved your application',
+                hired: 'Cannot withdraw after being hired',
+                withdrawn: 'Application already withdrawn',
+                rejected: 'Cannot withdraw a rejected application'
+            };
+            const message = messages[application.status] || 'Application cannot be withdrawn at this stage';
+            return res.status(400).json({ error: message });
+        }
+        const { data: updatedApplication } = await supabase
+            .from('applications')
+            .update({ status: 'withdrawn' })
+            .eq('id', appId)
+            .select()
+            .single();
+        await (0, applicationService_1.decrementApplicationCount)(student.id);
+        res.json(updatedApplication);
+        const { data: job } = await supabase.from('job_postings').select('title').eq('id', application.job_posting_id).maybeSingle();
+        notificationService
+            .notifyAdminsApplicationWithdrawn({
+            studentName: student.full_name,
+            jobTitle: job?.title || 'Unknown Job',
+            applicationId: application.id
+        })
+            .catch((err) => console.error('Notification error (application withdrawn):', err));
     }
-
-    const student = await Student.findOne({ userId: req.user.userId });
-
-    if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
     }
-
-    const application = await Application.findById(appId)
-      .populate({ path: 'jobPostingId', select: 'title' });
-
-    if (!application) {
-      return res.status(404).json({ error: 'Application not found' });
-    }
-
-    if (!application.studentId.equals(student._id)) {
-      return res.status(403).json({ error: 'You can only withdraw your own applications' });
-    }
-
-    if (application.status !== 'pending') {
-      const messages = {
-        reviewed: 'Cannot withdraw after admin has approved your application',
-        hired: 'Cannot withdraw after being hired',
-        withdrawn: 'Application already withdrawn',
-        rejected: 'Cannot withdraw a rejected application'
-      };
-
-      const message = messages[application.status] || 'Application cannot be withdrawn at this stage';
-      return res.status(400).json({ error: message });
-    }
-
-    application.status = 'withdrawn';
-    await application.save();
-
-    // Give back the application quota on withdrawal
-    await decrementApplicationCount(student._id);
-
-    res.json(application);
-
-    // Notify admins about the withdrawal (fire-and-forget, does not affect response).
-    // Only reached on successful withdrawal — blocked requests return 400 above.
-    notificationService
-      .notifyAdminsApplicationWithdrawn({
-        studentName: student.fullName,
-        jobTitle: application.jobPostingId?.title || 'Unknown Job',
-        applicationId: application._id.toString()
-      })
-      .catch((err) => console.error('Notification error (application withdrawn):', err));
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
 };
-
 exports.getProfile = async (req, res) => {
-  try {
-    const student = await Student.findOne(
-  { userId: req.user.userId },
-  'fullName email isDGShipping profileLink bio location availableFrom skills education experience resumeUrl introVideoUrl isHired'
-);
-
-    if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
+    try {
+        const student = await getStudentForUser(req.user.userId);
+        if (!student)
+            return res.status(404).json({ error: 'Student not found' });
+        res.json(buildProfileResponse(student));
     }
-
-    res.json(buildProfileResponse(student));
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
 };
-
-
 exports.updateProfile = async (req, res) => {
-  try {
-    const {
-      fullName,
-      email,
-      isDGShipping,
-      profileLink,
-      bio,
-      location,
-      availableFrom,
-      skills,
-      education,
-      experience
-    } = req.body || {};
-
-    const student = await Student.findOne({ userId: req.user.userId });
-
-    if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
-    }
-
-    let hasUpdates = false;
-
-    if (fullName !== undefined) {
-      if (typeof fullName !== 'string' || fullName.trim().length < 2 || fullName.trim().length > 100) {
-        return res.status(400).json({ error: 'Full name must be 2-100 characters' });
-      }
-      student.fullName = fullName.trim();
-      hasUpdates = true;
-    }
-
-    if (email !== undefined) {
-      if (!isValidEmail(email)) {
-        return res.status(400).json({ error: 'Invalid email format' });
-      }
-      // Check if email is taken by another user
-      const emailTaken = await isEmailTakenByOther(email, student._id);
-      if (emailTaken) {
-        return res.status(409).json({ error: 'Email already registered' });
-      }
-      student.email = email.toLowerCase();
-      hasUpdates = true;
-    }
-
-    if (isDGShipping !== undefined) {
-  if (!['yes', 'no'].includes(isDGShipping)) {
-    return res.status(400).json({ error: 'Invalid value for DG Shipping' });
-  }
-
-  student.isDGShipping = isDGShipping;
-  hasUpdates = true;
-}
-
-    if (profileLink !== undefined) {
-      if (profileLink && profileLink.length > 500) {
-        return res.status(400).json({ error: 'Profile link must be less than 500 characters' });
-      }
-      if (profileLink && !isValidUrl(profileLink)) {
-        return res.status(400).json({ error: 'Profile link must be a valid URL' });
-      }
-      student.profileLink = profileLink ? profileLink.trim() : null;
-      hasUpdates = true;
-    }
-
-    if (bio !== undefined) {
-      if (bio && (typeof bio !== 'string' || bio.length > 2000)) {
-        return res.status(400).json({ error: 'Bio must be a string up to 2000 characters' });
-      }
-      student.bio = bio ? bio.trim() : null;
-      hasUpdates = true;
-    }
-
-    if (location !== undefined) {
-      if (location && (typeof location !== 'string' || location.length > 200)) {
-        return res.status(400).json({ error: 'Location must be a string up to 200 characters' });
-      }
-      student.location = location ? location.trim() : null;
-      hasUpdates = true;
-    }
-
-    if (availableFrom !== undefined) {
-      if (availableFrom === null || availableFrom === '') {
-        student.availableFrom = null;
-      } else {
-        const parsedDate = normalizeDate(availableFrom);
-        if (!parsedDate) {
-          return res.status(400).json({ error: 'availableFrom must be a valid date' });
+    try {
+        const { fullName, email, isDGShipping, profileLink, bio, location, availableFrom, skills, education, experience } = req.body || {};
+        const student = await getStudentForUser(req.user.userId);
+        if (!student)
+            return res.status(404).json({ error: 'Student not found' });
+        const updates = {};
+        if (fullName !== undefined) {
+            if (typeof fullName !== 'string' || fullName.trim().length < 2 || fullName.trim().length > 100) {
+                return res.status(400).json({ error: 'Full name must be 2-100 characters' });
+            }
+            updates.full_name = fullName.trim();
         }
-        student.availableFrom = parsedDate;
-      }
-      hasUpdates = true;
+        if (email !== undefined) {
+            if (!isValidEmail(email)) {
+                return res.status(400).json({ error: 'Invalid email format' });
+            }
+            const emailTaken = await isEmailTakenByOther(email, student.id);
+            if (emailTaken) {
+                return res.status(409).json({ error: 'Email already registered' });
+            }
+            updates.email = email.toLowerCase();
+        }
+        if (isDGShipping !== undefined) {
+            if (!['yes', 'no'].includes(isDGShipping)) {
+                return res.status(400).json({ error: 'Invalid value for DG Shipping' });
+            }
+            updates.is_dg_shipping = isDGShipping;
+        }
+        if (profileLink !== undefined) {
+            if (profileLink && profileLink.length > 500) {
+                return res.status(400).json({ error: 'Profile link must be less than 500 characters' });
+            }
+            if (profileLink && !isValidUrl(profileLink)) {
+                return res.status(400).json({ error: 'Profile link must be a valid URL' });
+            }
+            updates.profile_link = profileLink ? profileLink.trim() : null;
+        }
+        if (bio !== undefined) {
+            if (bio && (typeof bio !== 'string' || bio.length > 2000)) {
+                return res.status(400).json({ error: 'Bio must be a string up to 2000 characters' });
+            }
+            updates.bio = bio ? bio.trim() : null;
+        }
+        if (location !== undefined) {
+            if (location && (typeof location !== 'string' || location.length > 200)) {
+                return res.status(400).json({ error: 'Location must be a string up to 200 characters' });
+            }
+            updates.location = location ? location.trim() : null;
+        }
+        if (availableFrom !== undefined) {
+            if (availableFrom === null || availableFrom === '') {
+                updates.available_from = null;
+            }
+            else {
+                const parsedDate = normalizeDate(availableFrom);
+                if (!parsedDate) {
+                    return res.status(400).json({ error: 'availableFrom must be a valid date' });
+                }
+                updates.available_from = parsedDate.toISOString().slice(0, 10);
+            }
+        }
+        if (skills !== undefined) {
+            if (!Array.isArray(skills)) {
+                return res.status(400).json({ error: 'Skills must be an array of strings' });
+            }
+            const normalizedSkills = Array.from(new Set(skills.map((skill) => (typeof skill === 'string' ? skill.trim() : '')).filter((skill) => skill)));
+            if (normalizedSkills.length > 50) {
+                return res.status(400).json({ error: 'Skills cannot exceed 50 entries' });
+            }
+            if (normalizedSkills.some((skill) => skill.length > 50)) {
+                return res.status(400).json({ error: 'Each skill must be 50 characters or fewer' });
+            }
+            updates.skills = normalizedSkills;
+        }
+        if (education !== undefined) {
+            if (!Array.isArray(education)) {
+                return res.status(400).json({ error: 'Education must be an array' });
+            }
+            const normalizedEducation = education
+                .map((entry, idx) => {
+                if (!entry || typeof entry !== 'object') {
+                    throw new Error(`Education entry ${idx + 1} is invalid`);
+                }
+                const normalizedEntry = {
+                    institution: sanitizeString(entry.institution, 200),
+                    degree: sanitizeString(entry.degree, 200),
+                    field: sanitizeString(entry.field, 200),
+                    startYear: normalizeYear(entry.startYear),
+                    endYear: normalizeYear(entry.endYear)
+                };
+                const providedStart = entry.startYear !== undefined && entry.startYear !== null && entry.startYear !== '';
+                const providedEnd = entry.endYear !== undefined && entry.endYear !== null && entry.endYear !== '';
+                if (providedStart && normalizedEntry.startYear === null) {
+                    throw new Error('Education start year must be between 1900 and the near future');
+                }
+                if (providedEnd && normalizedEntry.endYear === null) {
+                    throw new Error('Education end year must be between 1900 and the near future');
+                }
+                if (normalizedEntry.startYear && normalizedEntry.endYear && normalizedEntry.endYear < normalizedEntry.startYear) {
+                    throw new Error('Education end year cannot be before start year');
+                }
+                return normalizedEntry;
+            })
+                .filter((entry) => Object.values(entry).some((value) => value !== null));
+            updates.education = normalizedEducation;
+        }
+        if (experience !== undefined) {
+            if (!Array.isArray(experience)) {
+                return res.status(400).json({ error: 'Experience must be an array' });
+            }
+            const normalizedExperience = experience
+                .map((entry, idx) => {
+                if (!entry || typeof entry !== 'object') {
+                    throw new Error(`Experience entry ${idx + 1} is invalid`);
+                }
+                const normalizedEntry = {
+                    company: sanitizeString(entry.company, 200),
+                    title: sanitizeString(entry.title, 200),
+                    startDate: normalizeDate(entry.startDate),
+                    endDate: normalizeDate(entry.endDate),
+                    description: entry?.description ? entry.description.toString().slice(0, 2000) : null
+                };
+                if (entry.startDate && !normalizedEntry.startDate) {
+                    throw new Error('Experience start date must be a valid date');
+                }
+                if (entry.endDate && !normalizedEntry.endDate) {
+                    throw new Error('Experience end date must be a valid date');
+                }
+                if (normalizedEntry.endDate && normalizedEntry.startDate && normalizedEntry.endDate < normalizedEntry.startDate) {
+                    throw new Error('Experience end date cannot be before start date');
+                }
+                return normalizedEntry;
+            })
+                .filter((entry) => Object.values(entry).some((value) => value !== null));
+            updates.experience = normalizedExperience;
+        }
+        if (Object.keys(updates).length === 0) {
+            return res.status(400).json({ error: 'No fields to update' });
+        }
+        const { error } = await supabase.from('students').update(updates).eq('id', student.id);
+        if (error)
+            throw error;
+        res.json({ success: true });
     }
-
-    if (skills !== undefined) {
-      if (!Array.isArray(skills)) {
-        return res.status(400).json({ error: 'Skills must be an array of strings' });
-      }
-      const normalizedSkills = Array.from(new Set(
-        skills
-          .map((skill) => (typeof skill === 'string' ? skill.trim() : ''))
-          .filter((skill) => skill)
-      ));
-
-      if (normalizedSkills.length > 50) {
-        return res.status(400).json({ error: 'Skills cannot exceed 50 entries' });
-      }
-
-      if (normalizedSkills.some((skill) => skill.length > 50)) {
-        return res.status(400).json({ error: 'Each skill must be 50 characters or fewer' });
-      }
-
-      student.skills = normalizedSkills;
-      hasUpdates = true;
+    catch (error) {
+        if (error.message && error.message.startsWith('Education')) {
+            return res.status(400).json({ error: error.message });
+        }
+        if (error.message && error.message.startsWith('Experience')) {
+            return res.status(400).json({ error: error.message });
+        }
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
     }
-
-    if (education !== undefined) {
-      if (!Array.isArray(education)) {
-        return res.status(400).json({ error: 'Education must be an array' });
-      }
-
-      const normalizedEducation = education.map((entry, idx) => {
-        if (!entry || typeof entry !== 'object') {
-          throw new Error(`Education entry ${idx + 1} is invalid`);
-        }
-
-        const normalizedEntry = {
-          institution: sanitizeString(entry.institution, 200),
-          degree: sanitizeString(entry.degree, 200),
-          field: sanitizeString(entry.field, 200),
-          startYear: normalizeYear(entry.startYear),
-          endYear: normalizeYear(entry.endYear)
-        };
-
-        const providedStart = entry.startYear !== undefined && entry.startYear !== null && entry.startYear !== '';
-        const providedEnd = entry.endYear !== undefined && entry.endYear !== null && entry.endYear !== '';
-
-        if (providedStart && normalizedEntry.startYear === null) {
-          throw new Error('Education start year must be between 1900 and the near future');
-        }
-
-        if (providedEnd && normalizedEntry.endYear === null) {
-          throw new Error('Education end year must be between 1900 and the near future');
-        }
-
-        if (normalizedEntry.startYear && normalizedEntry.endYear && normalizedEntry.endYear < normalizedEntry.startYear) {
-          throw new Error('Education end year cannot be before start year');
-        }
-
-        return normalizedEntry;
-      }).filter((entry) => Object.values(entry).some((value) => value !== null));
-
-      student.education = normalizedEducation;
-      hasUpdates = true;
-    }
-
-    if (experience !== undefined) {
-      if (!Array.isArray(experience)) {
-        return res.status(400).json({ error: 'Experience must be an array' });
-      }
-
-      const normalizedExperience = experience.map((entry, idx) => {
-        if (!entry || typeof entry !== 'object') {
-          throw new Error(`Experience entry ${idx + 1} is invalid`);
-        }
-
-        const normalizedEntry = {
-          company: sanitizeString(entry.company, 200),
-          title: sanitizeString(entry.title, 200),
-          startDate: normalizeDate(entry.startDate),
-          endDate: normalizeDate(entry.endDate),
-          description: entry?.description ? entry.description.toString().slice(0, 2000) : null
-        };
-
-        if (entry.startDate && !normalizedEntry.startDate) {
-          throw new Error('Experience start date must be a valid date');
-        }
-
-        if (entry.endDate && !normalizedEntry.endDate) {
-          throw new Error('Experience end date must be a valid date');
-        }
-
-        if (normalizedEntry.endDate && normalizedEntry.startDate && normalizedEntry.endDate < normalizedEntry.startDate) {
-          throw new Error('Experience end date cannot be before start date');
-        }
-
-        return normalizedEntry;
-      }).filter((entry) => Object.values(entry).some((value) => value !== null));
-
-      student.experience = normalizedExperience;
-      hasUpdates = true;
-    }
-
-    // Note: introVideoUrl can only be set via file upload endpoint
-
-    if (!hasUpdates) {
-      return res.status(400).json({ error: 'No fields to update' });
-    }
-
-    await student.save();
-
-    res.json({ success: true });
-  } catch (error) {
-    if (error.message && error.message.startsWith('Education')) {
-      return res.status(400).json({ error: error.message });
-    }
-
-    if (error.message && error.message.startsWith('Experience')) {
-      return res.status(400).json({ error: error.message });
-    }
-
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
 };
-
 exports.uploadResume = async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'Resume file is required' });
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'Resume file is required' });
+        }
+        const student = await getStudentForUser(req.user.userId);
+        if (!student)
+            return res.status(404).json({ error: 'Student not found' });
+        const resumeUrl = await uploadStudentResume(req.file);
+        await supabase.from('students').update({ resume_url: resumeUrl }).eq('id', student.id);
+        res.json({ resumeUrl });
     }
-
-    const student = await Student.findOne({ userId: req.user.userId });
-
-    if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
+    catch (error) {
+        const clientErrorIndicators = ['resume', 'pdf', 'file buffer'];
+        if (error.message && clientErrorIndicators.some((indicator) => error.message.toLowerCase().includes(indicator))) {
+            return res.status(400).json({ error: error.message });
+        }
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
     }
-
-    const resumeUrl = await uploadStudentResume(req.file);
-
-    student.resumeUrl = resumeUrl;
-    await student.save();
-
-    res.json({ resumeUrl });
-  } catch (error) {
-    const clientErrorIndicators = ['resume', 'pdf', 'file buffer'];
-
-    if (error.message && clientErrorIndicators.some((indicator) => error.message.toLowerCase().includes(indicator))) {
-      return res.status(400).json({ error: error.message });
-    }
-
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
 };
-
 exports.getProfileCompleteness = async (req, res) => {
-  try {
-    const student = await Student.findOne({ userId: req.user.userId });
-
-    if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
+    try {
+        const student = await getStudentForUser(req.user.userId);
+        if (!student)
+            return res.status(404).json({ error: 'Student not found' });
+        const { percentage, missingItems } = buildCompleteness(student);
+        res.json({ percentage, missingItems });
     }
-
-    const { percentage, missingItems } = buildCompleteness(student);
-
-    res.json({ percentage, missingItems });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
 };
-
 exports.getSubscriptionZones = async (req, res) => {
-  try {
-    const student = await Student.findOne({ userId: req.user.userId });
-    if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
+    try {
+        const student = await getStudentForUser(req.user.userId);
+        if (!student)
+            return res.status(404).json({ error: 'Student not found' });
+        const access = await (0, zoneAccessService_1.getAccessibleZones)(student.id);
+        const { data: allZones } = await supabase.from('zones').select('id, name, description');
+        const formatZone = (z) => ({ id: z.id, name: z.name, description: z.description });
+        const zoneList = allZones || [];
+        if (access.allZones) {
+            return res.json({ allZonesIncluded: true, accessibleZones: zoneList.map(formatZone), lockedZones: [] });
+        }
+        const accessibleZoneIdSet = new Set(access.zoneIds);
+        const accessibleZones = zoneList.filter((z) => accessibleZoneIdSet.has(z.id)).map(formatZone);
+        const lockedZones = zoneList.filter((z) => !accessibleZoneIdSet.has(z.id)).map(formatZone);
+        res.json({ allZonesIncluded: false, accessibleZones, lockedZones });
     }
-
-    const { getAccessibleZones } = require('../services/zoneAccessService');
-    const access = await getAccessibleZones(student._id);
-
-    const allZones = await Zone.find().select('name description').lean();
-    const formatZone = z => ({ id: z._id, name: z.name, description: z.description });
-
-    if (access.allZones) {
-      return res.json({
-        allZonesIncluded: true,
-        accessibleZones: allZones.map(formatZone),
-        lockedZones: []
-      });
+    catch (error) {
+        console.error('Get subscription zones error:', error);
+        res.status(500).json({ error: 'Server error' });
     }
-
-    const accessibleZoneIdSet = new Set(access.zoneIds.map(id => id.toString()));
-
-    const accessibleZones = allZones
-      .filter(z => accessibleZoneIdSet.has(z._id.toString()))
-      .map(formatZone);
-
-    const lockedZones = allZones
-      .filter(z => !accessibleZoneIdSet.has(z._id.toString()))
-      .map(formatZone);
-
-    res.json({
-      allZonesIncluded: false,
-      accessibleZones,
-      lockedZones
-    });
-  } catch (error) {
-    console.error('Get subscription zones error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
 };
-
-exports.getZoneAddons = async (req, res) => {
-  try {
-    const Addon = require('../models/Addon');
-    const addons = await Addon.find({ type: 'zone' })
-      .select('name priceINR priceUSD zoneCount unlockAllZones')
-      .sort({ priceINR: 1 })
-      .lean();
-
-    const formattedAddons = addons.map(a => ({
-      id: a._id,
-      name: a.name,
-      priceINR: a.priceINR,
-      priceUSD: a.priceUSD,
-      zoneCount: a.zoneCount,
-      unlockAllZones: a.unlockAllZones
-    }));
-
-    res.json({ addons: formattedAddons });
-  } catch (error) {
-    console.error('Get zone addons error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+exports.getZoneAddons = async (_req, res) => {
+    try {
+        const { data: addons } = await supabase
+            .from('addons')
+            .select('id, name, price_inr, price_usd, zone_count, unlock_all_zones')
+            .eq('type', 'zone')
+            .order('price_inr', { ascending: true });
+        const formattedAddons = (addons || []).map((a) => ({
+            id: a.id,
+            name: a.name,
+            priceINR: a.price_inr,
+            priceUSD: a.price_usd,
+            zoneCount: a.zone_count,
+            unlockAllZones: a.unlock_all_zones
+        }));
+        res.json({ addons: formattedAddons });
+    }
+    catch (error) {
+        console.error('Get zone addons error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
 };
-
-exports.getJobsAddons = async (req, res) => {
-  try {
-    const Addon = require('../models/Addon');
-    const addons = await Addon.find({ type: 'jobs' })
-      .select('name priceINR priceUSD jobCreditCount')
-      .sort({ priceINR: 1 })
-      .lean();
-
-    const formattedAddons = addons.map(a => ({
-      id: a._id,
-      name: a.name,
-      priceINR: a.priceINR,
-      priceUSD: a.priceUSD,
-      jobCredits: a.jobCreditCount
-    }));
-
-    res.json({ addons: formattedAddons });
-  } catch (error) {
-    console.error('Get jobs addons error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+exports.getJobsAddons = async (_req, res) => {
+    try {
+        const { data: addons } = await supabase
+            .from('addons')
+            .select('id, name, price_inr, price_usd, job_credit_count')
+            .eq('type', 'jobs')
+            .order('price_inr', { ascending: true });
+        const formattedAddons = (addons || []).map((a) => ({
+            id: a.id,
+            name: a.name,
+            priceINR: a.price_inr,
+            priceUSD: a.price_usd,
+            jobCredits: a.job_credit_count
+        }));
+        res.json({ addons: formattedAddons });
+    }
+    catch (error) {
+        console.error('Get jobs addons error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
 };
+//# sourceMappingURL=studentController.js.map

@@ -1,299 +1,276 @@
-const mongoose = require('mongoose');
-
-const Student = require('../models/Student');
-const ActiveSubscription = require('../models/ActiveSubscription');
-const Addon = require('../models/Addon');
-const SubscriptionAddon = require('../models/SubscriptionAddon');
-const SubscriptionZone = require('../models/SubscriptionZone');
-const JobPosting = require('../models/JobPosting');
-const PayPerJobPurchase = require('../models/PayPerJobPurchase');
-const Zone = require('../models/Zone');
-
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.getQuotaUnlockOptions = exports.getUnlockOptions = exports.canAccessJob = exports.getAccessibleZones = void 0;
+const client_1 = require("../lib/supabase/client");
+const zonePricingService_1 = require("./zonePricingService");
 const getAccessibleZones = async (studentId) => {
-  const student = await Student.findById(studentId);
-  if (!student) {
-    return { allZones: false, zoneIds: [] };
-  }
-
-  const subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
-    .populate('serviceId', 'allZonesIncluded');
-
-  if (!subscription) {
-    return { allZones: false, zoneIds: [] };
-  }
-
-  // Check if plan grants all zones (Free tier, Premium, etc.)
-  if (subscription.serviceId?.allZonesIncluded) {
-    return { allZones: true, zoneIds: [] };
-  }
-
-  // Check for "unlock all zones" addon
-  const unlockAllAddonIds = await Addon.find({ unlockAllZones: true }).distinct('_id');
-  if (unlockAllAddonIds.length > 0) {
-    const hasUnlockAll = await SubscriptionAddon.exists({
-      subscriptionId: subscription._id,
-      addonId: { $in: unlockAllAddonIds }
-    });
-
-    if (hasUnlockAll) {
-      return { allZones: true, zoneIds: [] };
+    const supabase = (0, client_1.getSupabaseClient)();
+    const { data: student } = await supabase.from('students').select('current_subscription_id').eq('id', studentId).maybeSingle();
+    if (!student || !student.current_subscription_id) {
+        return { allZones: false, zoneIds: [] };
     }
-  }
-
-  // Get zones from plan + individual addons via SubscriptionZone
-  const zoneIds = await SubscriptionZone.find({
-    subscriptionId: subscription._id
-  }).distinct('zoneId');
-
-  return { allZones: false, zoneIds };
+    const { data: subscription } = await supabase
+        .from('active_subscriptions')
+        .select('id, service_id')
+        .eq('id', student.current_subscription_id)
+        .maybeSingle();
+    if (!subscription) {
+        return { allZones: false, zoneIds: [] };
+    }
+    const { data: service } = await supabase
+        .from('available_services')
+        .select('all_zones_included')
+        .eq('id', subscription.service_id)
+        .maybeSingle();
+    // Check if plan grants all zones (Free tier, Premium, etc.)
+    if (service?.all_zones_included) {
+        return { allZones: true, zoneIds: [] };
+    }
+    // Check for "unlock all zones" addon
+    const { data: unlockAllAddons } = await supabase.from('addons').select('id').eq('unlock_all_zones', true);
+    const unlockAllAddonIds = (unlockAllAddons || []).map((a) => a.id);
+    if (unlockAllAddonIds.length > 0) {
+        const { count } = await supabase
+            .from('subscription_addons')
+            .select('*', { count: 'exact', head: true })
+            .eq('subscription_id', subscription.id)
+            .in('addon_id', unlockAllAddonIds);
+        if ((count ?? 0) > 0) {
+            return { allZones: true, zoneIds: [] };
+        }
+    }
+    // Get zones from plan + individual addons via subscription_zones
+    const { data: subZones } = await supabase.from('subscription_zones').select('zone_id').eq('subscription_id', subscription.id);
+    return { allZones: false, zoneIds: (subZones || []).map((z) => z.zone_id) };
 };
-
+exports.getAccessibleZones = getAccessibleZones;
 const canAccessJob = async (studentId, jobPostingId) => {
-  // Check Pay Per Job purchase first
-  const payPerJob = await PayPerJobPurchase.findOne({
-    studentId,
-    jobPostingId,
-    status: 'completed'
-  });
-  if (payPerJob) {
-    return { canAccess: true, source: 'pay-per-job' };
-  }
-
-  const job = await JobPosting.findById(jobPostingId).populate('countryId', 'zoneId');
-
-  // Jobs without country set are accessible to all
-  if (!job || !job.countryId) {
-    return { canAccess: true, source: 'no-zone-restriction' };
-  }
-
-  const jobZoneId = job.countryId.zoneId;
-  const access = await getAccessibleZones(studentId);
-
-  if (access.allZones) {
-    return { canAccess: true, source: 'all-zones' };
-  }
-
-  const hasAccess = access.zoneIds.some(id => id.equals(jobZoneId));
-  if (hasAccess) {
-    return { canAccess: true, source: 'subscription' };
-  }
-
-  // Get zone details for the lock reason
-  const zone = await Zone.findById(jobZoneId).select('name');
-
-  return {
-    canAccess: false,
-    requiredZoneId: jobZoneId,
-    zoneName: zone?.name || 'Unknown Zone'
-  };
+    const supabase = (0, client_1.getSupabaseClient)();
+    // Check Pay Per Job purchase first
+    const { data: payPerJob } = await supabase
+        .from('pay_per_job_purchases')
+        .select('id')
+        .eq('student_id', studentId)
+        .eq('job_posting_id', jobPostingId)
+        .eq('status', 'completed')
+        .maybeSingle();
+    if (payPerJob) {
+        return { canAccess: true, source: 'pay-per-job' };
+    }
+    const { data: job } = await supabase.from('job_postings').select('id, country_id').eq('id', jobPostingId).maybeSingle();
+    // Jobs without country set are accessible to all
+    if (!job || !job.country_id) {
+        return { canAccess: true, source: 'no-zone-restriction' };
+    }
+    const { data: country } = await supabase.from('zone_countries').select('zone_id').eq('id', job.country_id).maybeSingle();
+    const jobZoneId = country?.zone_id;
+    if (!jobZoneId) {
+        return { canAccess: true, source: 'no-zone-restriction' };
+    }
+    const access = await (0, exports.getAccessibleZones)(studentId);
+    if (access.allZones) {
+        return { canAccess: true, source: 'all-zones' };
+    }
+    const hasAccess = access.zoneIds.includes(jobZoneId);
+    if (hasAccess) {
+        return { canAccess: true, source: 'subscription' };
+    }
+    // Get zone details for the lock reason
+    const { data: zone } = await supabase.from('zones').select('name').eq('id', jobZoneId).maybeSingle();
+    return {
+        canAccess: false,
+        requiredZoneId: jobZoneId,
+        zoneName: zone?.name || 'Unknown Zone'
+    };
 };
-
+exports.canAccessJob = canAccessJob;
 const getUnlockOptions = async (zoneId, studentId = null) => {
-  const addons = await Addon.find({
-    type: 'zone'
-  }).select('name priceINR priceUSD zoneCount unlockAllZones').lean();
-
-  // Get zone name for description
-  const zone = zoneId ? await Zone.findById(zoneId).select('name').lean() : null;
-  const zoneName = zone?.name || 'this zone';
-
-  const options = [];
-
-  // Single zone addon
-  const singleZone = addons.find(a => a.zoneCount === 1 && !a.unlockAllZones);
-  if (singleZone) {
-    options.push({
-      type: 'zone-addon',
-      addonId: singleZone._id,
-      label: singleZone.name,
-      description: `Unlock ${zoneName} permanently`,
-      priceINR: singleZone.priceINR,
-      priceUSD: singleZone.priceUSD,
-      zonesIncluded: singleZone.zoneCount
-    });
-  }
-
-  // Multi-zone bundle addons (2+ zones, not unlock all)
-  const bundles = addons
-    .filter(a => a.zoneCount > 1 && !a.unlockAllZones)
-    .sort((a, b) => a.zoneCount - b.zoneCount);
-
-  for (const bundle of bundles) {
-    options.push({
-      type: 'zone-addon',
-      addonId: bundle._id,
-      label: bundle.name,
-      description: `Unlock any ${bundle.zoneCount} zones`,
-      priceINR: bundle.priceINR,
-      priceUSD: bundle.priceUSD,
-      zonesIncluded: bundle.zoneCount
-    });
-  }
-
-  // Unlock all zones addon
-  const unlockAll = addons.find(a => a.unlockAllZones);
-  if (unlockAll) {
-    options.push({
-      type: 'zone-addon',
-      addonId: unlockAll._id,
-      label: unlockAll.name,
-      description: 'Unlock all zones permanently',
-      priceINR: unlockAll.priceINR,
-      priceUSD: unlockAll.priceUSD,
-      unlockAllZones: true
-    });
-  }
-
-  // Pay per job option (pricing from database)
-  const payPerJobPricing = await Addon.getPayPerJobPricing();
-  options.push({
-    type: 'pay-per-job',
-    label: 'One-time Job Access',
-    description: 'Apply to this job only',
-    priceINR: payPerJobPricing.priceINR,
-    priceUSD: payPerJobPricing.priceUSD
-  });
-
-  // Upgrade plan option - find a plan with more zones than current plan
-  const AvailableService = require('../models/AvailableService');
-  const PlanZone = require('../models/PlanZone');
-
-  let currentPlanZoneCount = 0;
-  let currentPlanId = null;
-
-  // Get current plan's zone count if studentId provided
-  if (studentId) {
-    const student = await Student.findById(studentId);
-    if (student?.currentSubscriptionId) {
-      const subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
-        .select('serviceId');
-      if (subscription?.serviceId) {
-        currentPlanId = subscription.serviceId;
-        currentPlanZoneCount = await PlanZone.countDocuments({ planId: currentPlanId });
-      }
+    const supabase = (0, client_1.getSupabaseClient)();
+    const { data: addons } = await supabase
+        .from('addons')
+        .select('id, name, price_inr, price_usd, zone_count, unlock_all_zones')
+        .eq('type', 'zone');
+    const list = addons || [];
+    const zoneRow = zoneId ? (await supabase.from('zones').select('name').eq('id', zoneId).maybeSingle()).data : null;
+    const zoneName = zoneRow?.name || 'this zone';
+    const options = [];
+    // Single zone addon
+    const singleZone = list.find((a) => a.zone_count === 1 && !a.unlock_all_zones);
+    if (singleZone) {
+        options.push({
+            type: 'zone-addon',
+            addonId: singleZone.id,
+            label: singleZone.name,
+            description: `Unlock ${zoneName} permanently`,
+            priceINR: singleZone.price_inr,
+            priceUSD: singleZone.price_usd,
+            zonesIncluded: singleZone.zone_count
+        });
     }
-  }
-
-  // Find plans with more zones than current, or allZonesIncluded
-  const allPlans = await AvailableService.find({
-    isActive: true,
-    tier: 'paid'
-  }).select('_id name allZonesIncluded').lean();
-
-  // Get zone counts for each plan
-  const planZoneCounts = await PlanZone.aggregate([
-    { $group: { _id: '$planId', zoneCount: { $sum: 1 } } }
-  ]);
-  const zoneCountMap = new Map(planZoneCounts.map(p => [p._id.toString(), p.zoneCount]));
-
-  // Find upgrade options: plans with more zones OR allZonesIncluded
-  const upgradePlans = allPlans.filter(plan => {
-    // Skip current plan
-    if (currentPlanId && plan._id.toString() === currentPlanId.toString()) {
-      return false;
+    // Multi-zone bundle addons (2+ zones, not unlock all)
+    const bundles = list
+        .filter((a) => (a.zone_count ?? 0) > 1 && !a.unlock_all_zones)
+        .sort((a, b) => (a.zone_count ?? 0) - (b.zone_count ?? 0));
+    for (const bundle of bundles) {
+        options.push({
+            type: 'zone-addon',
+            addonId: bundle.id,
+            label: bundle.name,
+            description: `Unlock any ${bundle.zone_count} zones`,
+            priceINR: bundle.price_inr,
+            priceUSD: bundle.price_usd,
+            zonesIncluded: bundle.zone_count
+        });
     }
-    // Include if allZonesIncluded
-    if (plan.allZonesIncluded) {
-      return true;
+    // Unlock all zones addon
+    const unlockAll = list.find((a) => a.unlock_all_zones);
+    if (unlockAll) {
+        options.push({
+            type: 'zone-addon',
+            addonId: unlockAll.id,
+            label: unlockAll.name,
+            description: 'Unlock all zones permanently',
+            priceINR: unlockAll.price_inr,
+            priceUSD: unlockAll.price_usd,
+            unlockAllZones: true
+        });
     }
-    // Include if has more zones than current plan
-    const planZones = zoneCountMap.get(plan._id.toString()) || 0;
-    return planZones > currentPlanZoneCount;
-  });
-
-  // Pick the cheapest upgrade option
-  if (upgradePlans.length > 0) {
-    // Sort by zone count to get the next tier up
-    const sortedUpgrades = upgradePlans.sort((a, b) => {
-      const aZones = a.allZonesIncluded ? 999 : (zoneCountMap.get(a._id.toString()) || 0);
-      const bZones = b.allZonesIncluded ? 999 : (zoneCountMap.get(b._id.toString()) || 0);
-      return aZones - bZones;
-    });
-
-    const upgradePlan = sortedUpgrades[0];
+    // Pay per job option (pricing from database)
+    const payPerJobPricing = await (0, zonePricingService_1.getPayPerJobPricing)();
     options.push({
-      type: 'upgrade-plan',
-      label: `Upgrade to ${upgradePlan.name}`,
-      description: upgradePlan.allZonesIncluded
-        ? 'Get access to all zones + more applications'
-        : 'Get access to more zones + applications',
-      planId: upgradePlan._id,
-      url: '/pricing'
+        type: 'pay-per-job',
+        label: 'One-time Job Access',
+        description: 'Apply to this job only',
+        priceINR: payPerJobPricing.priceINR,
+        priceUSD: payPerJobPricing.priceUSD
     });
-  }
-
-  return options;
+    // Upgrade plan option - find a plan with more zones than current plan
+    let currentPlanZoneCount = 0;
+    let currentPlanId = null;
+    if (studentId) {
+        const { data: student } = await supabase.from('students').select('current_subscription_id').eq('id', studentId).maybeSingle();
+        if (student?.current_subscription_id) {
+            const { data: subscription } = await supabase
+                .from('active_subscriptions')
+                .select('service_id')
+                .eq('id', student.current_subscription_id)
+                .maybeSingle();
+            if (subscription?.service_id) {
+                currentPlanId = subscription.service_id;
+                const { count } = await supabase
+                    .from('plan_zones')
+                    .select('*', { count: 'exact', head: true })
+                    .eq('plan_id', currentPlanId);
+                currentPlanZoneCount = count ?? 0;
+            }
+        }
+    }
+    const { data: allPlans } = await supabase
+        .from('available_services')
+        .select('id, name, all_zones_included')
+        .eq('is_active', true)
+        .eq('tier', 'paid');
+    const plans = allPlans || [];
+    const { data: allPlanZoneRows } = await supabase.from('plan_zones').select('plan_id');
+    const zoneCountMap = new Map();
+    for (const row of allPlanZoneRows || []) {
+        zoneCountMap.set(row.plan_id, (zoneCountMap.get(row.plan_id) || 0) + 1);
+    }
+    // Find upgrade options: plans with more zones OR allZonesIncluded
+    const upgradePlans = plans.filter((plan) => {
+        if (currentPlanId && plan.id === currentPlanId) {
+            return false;
+        }
+        if (plan.all_zones_included) {
+            return true;
+        }
+        const planZones = zoneCountMap.get(plan.id) || 0;
+        return planZones > currentPlanZoneCount;
+    });
+    // Pick the cheapest upgrade option (next tier up)
+    if (upgradePlans.length > 0) {
+        const sorted = [...upgradePlans].sort((a, b) => {
+            const aZones = a.all_zones_included ? 999 : (zoneCountMap.get(a.id) || 0);
+            const bZones = b.all_zones_included ? 999 : (zoneCountMap.get(b.id) || 0);
+            return aZones - bZones;
+        });
+        const upgradePlan = sorted[0];
+        options.push({
+            type: 'upgrade-plan',
+            label: `Upgrade to ${upgradePlan.name}`,
+            description: upgradePlan.all_zones_included
+                ? 'Get access to all zones + more applications'
+                : 'Get access to more zones + applications',
+            planId: upgradePlan.id,
+            url: '/pricing'
+        });
+    }
+    return options;
 };
-
+exports.getUnlockOptions = getUnlockOptions;
 const getQuotaUnlockOptions = async (studentId = null) => {
-  const options = [];
-
-  // Job credit addons (Extra Job Credits)
-  const jobAddons = await Addon.find({ type: 'jobs' })
-    .select('name priceINR priceUSD jobCreditCount')
-    .sort({ jobCreditCount: 1 })
-    .lean();
-
-  for (const addon of jobAddons) {
-    options.push({
-      type: 'jobs-addon',
-      addonId: addon._id,
-      label: addon.name,
-      description: `Add ${addon.jobCreditCount} extra job application${addon.jobCreditCount > 1 ? 's' : ''}`,
-      priceINR: addon.priceINR,
-      priceUSD: addon.priceUSD,
-      jobCredits: addon.jobCreditCount
-    });
-  }
-
-  // Upgrade plan option - find a plan with more applications
-  const AvailableService = require('../models/AvailableService');
-
-  let currentPlanMaxApps = 0;
-  let currentPlanId = null;
-
-  if (studentId) {
-    const student = await Student.findById(studentId);
-    if (student?.currentSubscriptionId) {
-      const subscription = await ActiveSubscription.findById(student.currentSubscriptionId)
-        .populate('serviceId', 'maxApplications');
-      if (subscription?.serviceId) {
-        currentPlanId = subscription.serviceId._id;
-        currentPlanMaxApps = subscription.serviceId.maxApplications || 0;
-      }
+    const supabase = (0, client_1.getSupabaseClient)();
+    const options = [];
+    const { data: jobAddons } = await supabase
+        .from('addons')
+        .select('id, name, price_inr, price_usd, job_credit_count')
+        .eq('type', 'jobs')
+        .order('job_credit_count', { ascending: true });
+    for (const addon of jobAddons || []) {
+        options.push({
+            type: 'jobs-addon',
+            addonId: addon.id,
+            label: addon.name,
+            description: `Add ${addon.job_credit_count} extra job application${(addon.job_credit_count || 0) > 1 ? 's' : ''}`,
+            priceINR: addon.price_inr,
+            priceUSD: addon.price_usd,
+            jobCredits: addon.job_credit_count
+        });
     }
-  }
-
-  // Find plans with more applications or unlimited
-  const upgradePlans = await AvailableService.find({
-    isActive: true,
-    tier: 'paid',
-    _id: { $ne: currentPlanId },
-    $or: [
-      { maxApplications: null }, // Unlimited
-      { maxApplications: { $gt: currentPlanMaxApps } }
-    ]
-  }).select('_id name maxApplications').sort({ maxApplications: 1 }).lean();
-
-  if (upgradePlans.length > 0) {
-    const upgradePlan = upgradePlans[0];
-    options.push({
-      type: 'upgrade-plan',
-      label: `Upgrade to ${upgradePlan.name}`,
-      description: upgradePlan.maxApplications === null
-        ? 'Unlimited job applications'
-        : `Up to ${upgradePlan.maxApplications} job applications`,
-      planId: upgradePlan._id,
-      url: '/pricing'
-    });
-  }
-
-  return options;
+    let currentPlanMaxApps = 0;
+    let currentPlanId = null;
+    if (studentId) {
+        const { data: student } = await supabase.from('students').select('current_subscription_id').eq('id', studentId).maybeSingle();
+        if (student?.current_subscription_id) {
+            const { data: subscription } = await supabase
+                .from('active_subscriptions')
+                .select('service_id')
+                .eq('id', student.current_subscription_id)
+                .maybeSingle();
+            if (subscription?.service_id) {
+                const { data: service } = await supabase
+                    .from('available_services')
+                    .select('id, max_applications')
+                    .eq('id', subscription.service_id)
+                    .maybeSingle();
+                if (service) {
+                    currentPlanId = service.id;
+                    currentPlanMaxApps = service.max_applications || 0;
+                }
+            }
+        }
+    }
+    let query = supabase.from('available_services').select('id, name, max_applications').eq('is_active', true).eq('tier', 'paid');
+    if (currentPlanId) {
+        query = query.neq('id', currentPlanId);
+    }
+    const { data: candidatePlans } = await query;
+    const upgradePlans = (candidatePlans || [])
+        .filter((p) => p.max_applications === null || (p.max_applications ?? 0) > currentPlanMaxApps)
+        .sort((a, b) => (a.max_applications ?? Infinity) - (b.max_applications ?? Infinity));
+    if (upgradePlans.length > 0) {
+        const upgradePlan = upgradePlans[0];
+        options.push({
+            type: 'upgrade-plan',
+            label: `Upgrade to ${upgradePlan.name}`,
+            description: upgradePlan.max_applications === null
+                ? 'Unlimited job applications'
+                : `Up to ${upgradePlan.max_applications} job applications`,
+            planId: upgradePlan.id,
+            url: '/pricing'
+        });
+    }
+    return options;
 };
-
-module.exports = {
-  getAccessibleZones,
-  canAccessJob,
-  getUnlockOptions,
-  getQuotaUnlockOptions
-};
+exports.getQuotaUnlockOptions = getQuotaUnlockOptions;
+//# sourceMappingURL=zoneAccessService.js.map
