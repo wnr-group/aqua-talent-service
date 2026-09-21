@@ -1,2240 +1,1522 @@
-const mongoose = require('mongoose');
-
-const User = require('../models/User');
-const Company = require('../models/Company');
-const JobPosting = require('../models/JobPosting');
-const Student = require('../models/Student');
-const Application = require('../models/Application');
-const AvailableService = require('../models/AvailableService');
-const ActiveSubscription = require('../models/ActiveSubscription');
-const PaymentRecord = require('../models/PaymentRecord');
-const SystemConfig = require('../models/SystemConfig');
-const Zone = require('../models/Zone');
-const ZoneCountry = require('../models/ZoneCountry');
-const PlanZone = require('../models/PlanZone');
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const client_1 = require("../lib/supabase/client");
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const emailService = require('../services/emailService');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const notificationService = require('../services/notificationService');
-const {
-  updateCompanyStatusSchema,
-  updateJobStatusSchema,
-  adminUpdateApplicationSchema,
-  companyProfileSchema
-} = require('../utils/validation');
-const { COMPANY_STATUSES, JOB_STATUSES, APPLICATION_STATUSES, JOB_TYPES, CONFIG_KEYS, CURRENCIES, BILLING_CYCLES } = require('../constants');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { updateCompanyStatusSchema, updateJobStatusSchema, adminUpdateApplicationSchema } = require('../utils/validation');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { COMPANY_STATUSES, JOB_STATUSES, APPLICATION_STATUSES, JOB_TYPES, CONFIG_KEYS, CURRENCIES } = require('../constants');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { getPresignedUrl } = require('../services/mediaService');
-const {
-  applyCompanyProfileUpdates,
-  buildCompanyProfileResponse,
-  invalidatePublicCompanyProfileCache
-} = require('../services/companyProfileService');
-
-const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
+const companyProfileService_1 = require("../services/companyProfileService");
+const supabase = (0, client_1.getSupabaseClient)();
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isValidUuid = (value) => typeof value === 'string' && UUID_RE.test(value);
 const buildSubscriptionPlanResponse = (plan) => ({
-  id: plan._id,
-  name: plan.name,
-  description: plan.description,
-  maxApplications: plan.maxApplications,
-  price: plan.price,
-  priceINR: plan.priceINR,
-  priceUSD: plan.priceUSD,
-  currency: plan.currency,
-  billingCycle: 'one-time',
-  discount: plan.discount,
-  features: plan.features,
-  badge: plan.badge,
-  displayOrder: plan.displayOrder,
-  resumeDownloads: plan.resumeDownloads,
-  videoViews: plan.videoViews,
-  prioritySupport: plan.prioritySupport,
-  profileBoost: plan.profileBoost,
-  applicationHighlight: plan.applicationHighlight,
-  allZonesIncluded: plan.allZonesIncluded,
-  isActive: plan.isActive,
-  createdAt: plan.createdAt,
-  updatedAt: plan.updatedAt
+    id: plan.id,
+    name: plan.name,
+    description: plan.description,
+    maxApplications: plan.max_applications,
+    price: plan.price,
+    priceINR: plan.price_inr,
+    priceUSD: plan.price_usd,
+    currency: plan.currency,
+    billingCycle: 'one-time',
+    discount: plan.discount,
+    features: plan.features,
+    badge: plan.badge,
+    displayOrder: plan.display_order,
+    resumeDownloads: plan.resume_downloads,
+    videoViews: plan.video_views,
+    prioritySupport: plan.priority_support,
+    profileBoost: plan.profile_boost,
+    applicationHighlight: plan.application_highlight,
+    allZonesIncluded: plan.all_zones_included,
+    isActive: plan.is_active,
+    createdAt: plan.created_at,
+    updatedAt: plan.updated_at
 });
-
-exports.getDashboard = async (req, res) => {
-  try {
-    const companyStats = await Company.aggregate([
-      {
-        $group: {
-          _id: null,
-          totalCompanies: { $sum: 1 },
-          pendingCompanies: {
-            $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] }
-          }
-        }
-      }
-    ]);
-
-    const jobStats = await JobPosting.aggregate([
-      {
-        $group: {
-          _id: null,
-          totalJobs: { $sum: 1 },
-          pendingJobs: {
-            $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] }
-          },
-          activeJobs: {
-            $sum: { $cond: [{ $eq: ['$status', 'approved'] }, 1, 0] }
-          }
-        }
-      }
-    ]);
-
-    const totalStudents = await Student.countDocuments();
-
-    const applicationStats = await Application.aggregate([
-      {
-        $group: {
-          _id: null,
-          totalApplications: { $sum: 1 },
-          totalHires: {
-            $sum: { $cond: [{ $eq: ['$status', 'hired'] }, 1, 0] }
-          }
-        }
-      }
-    ]);
-
-    res.json({
-      pendingCompanies: companyStats[0]?.pendingCompanies || 0,
-      totalCompanies: companyStats[0]?.totalCompanies || 0,
-      pendingJobs: jobStats[0]?.pendingJobs || 0,
-      activeJobs: jobStats[0]?.activeJobs || 0,
-      totalJobs: jobStats[0]?.totalJobs || 0,
-      totalStudents,
-      totalApplications: applicationStats[0]?.totalApplications || 0,
-      totalHires: applicationStats[0]?.totalHires || 0
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
+// Minimal replacement for the old SystemConfig.getValue/setValue Mongoose statics.
+const getConfigValue = async (key, defaultValue = null) => {
+    const { data } = await supabase.from('system_config').select('value').eq('key', key).maybeSingle();
+    return data ? data.value : defaultValue;
 };
-
-exports.getCompanies = async (req, res) => {
-  try {
-    const { status, search, page = 1, limit = 20 } = req.query;
-
-    if (status && !COMPANY_STATUSES.includes(status)) {
-      return res.status(400).json({ error: 'Status must be pending, approved, or rejected' });
+const setConfigValue = async (key, value, description, updatedBy) => {
+    const { data: existing } = await supabase.from('system_config').select('id').eq('key', key).maybeSingle();
+    if (existing) {
+        return supabase.from('system_config').update({ value, description, updated_by: updatedBy }).eq('id', existing.id);
     }
-
-    const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 20));
-    const skip = (pageNum - 1) * limitNum;
-
-    const matchConditions = {};
-    if (status) {
-      matchConditions.status = status;
-    }
-
-    const pipeline = [
-      { $match: matchConditions },
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'userId',
-          foreignField: '_id',
-          as: 'user'
-        }
-      },
-      { $unwind: '$user' }
-    ];
-
-    // Add search filter after lookup
-    if (search) {
-      const escapedSearch = escapeRegex(search);
-      pipeline.push({
-        $match: {
-          $or: [
-            { name: { $regex: escapedSearch, $options: 'i' } },
-            { email: { $regex: escapedSearch, $options: 'i' } },
-            { 'user.username': { $regex: escapedSearch, $options: 'i' } }
-          ]
-        }
-      });
-    }
-
-    // Count total before pagination
-    const countPipeline = [...pipeline, { $count: 'total' }];
-    const countResult = await Company.aggregate(countPipeline);
-    const total = countResult[0]?.total || 0;
-
-    // Add sorting and pagination
-    pipeline.push(
-      {
-        $project: {
-          _id: 1,
-          username: '$user.username',
-          isActive: '$user.isActive',
-          name: 1,
-          email: 1,
-          status: 1,
-          rejectionReason: 1,
-          createdAt: 1,
-          approvedAt: 1
-        }
-      },
-      { $sort: { createdAt: -1 } },
-      { $skip: skip },
-      { $limit: limitNum }
-    );
-
-    const companies = await Company.aggregate(pipeline);
-
-    const result = companies.map(c => ({
-      id: c._id.toString(),
-      username: c.username,
-      isActive: c.isActive !== false,
-      name: c.name,
-      email: c.email,
-      status: c.status,
-      rejectionReason: c.rejectionReason,
-      createdAt: c.createdAt,
-      approvedAt: c.approvedAt
-    }));
-
-    res.json({
-      companies: result,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        totalPages: Math.ceil(total / limitNum)
-      }
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
+    return supabase.from('system_config').insert({ key, value, description, updated_by: updatedBy });
 };
-
-exports.updateCompany = async (req, res) => {
-  try {
-    const { companyId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(companyId)) {
-      return res.status(400).json({ error: 'Invalid company ID format' });
-    }
-
-    const parsed = updateCompanyStatusSchema.parse(req.body);
-
-    const company = await Company.findById(companyId);
-
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
-    }
-
-    const previousStatus = company.status;
-
-    const updateFields = { status: parsed.status };
-
-    if (parsed.status === 'approved') {
-      updateFields.approvedAt = new Date();
-      updateFields.rejectionReason = null;
-    } else if (parsed.status === 'rejected') {
-      updateFields.rejectionReason = parsed.rejectionReason;
-      updateFields.approvedAt = null;
-    } else if (parsed.status === 'pending') {
-      updateFields.approvedAt = null;
-    }
-
-    const updatedCompany = await Company.findByIdAndUpdate(
-      companyId,
-      { $set: updateFields },
-      { returnDocument: 'after' }
-    ).populate('userId', 'username');
-
-    res.json({
-      id: updatedCompany._id.toString(),
-      username: updatedCompany.userId.username,
-      name: updatedCompany.name,
-      email: updatedCompany.email,
-      status: updatedCompany.status,
-      rejectionReason: updatedCompany.rejectionReason,
-      createdAt: updatedCompany.createdAt,
-      approvedAt: updatedCompany.approvedAt
-    });
-
-    const statusChanged = previousStatus !== updatedCompany.status;
-    const companyUserId = updatedCompany.userId?._id || updatedCompany.userId;
-
-    if (statusChanged && parsed.status === 'approved') {
-      emailService
-        .sendCompanyApprovedEmail(
-          updatedCompany.email,
-          {
-            companyName: updatedCompany.name,
-            recipientName: updatedCompany.name
-          },
-          { userId: companyUserId }
-        )
-        .catch((error) => console.error('Failed to send company approval email', error));
-
-      notificationService
-        .notifyCompanyApproved(companyUserId, { companyName: updatedCompany.name })
-        .catch((err) => console.error('Notification error (company approved):', err));
-    } else if (statusChanged && parsed.status === 'rejected') {
-      emailService
-        .sendCompanyRejectedEmail(
-          updatedCompany.email,
-          {
-            companyName: updatedCompany.name,
-            recipientName: updatedCompany.name,
-            reason: parsed.rejectionReason || updatedCompany.rejectionReason
-          },
-          { userId: companyUserId }
-        )
-        .catch((error) => console.error('Failed to send company rejection email', error));
-
-      notificationService
-        .notifyCompanyRejected(companyUserId, {
-          companyName: updatedCompany.name,
-          rejectionReason: parsed.rejectionReason || updatedCompany.rejectionReason
-        })
-        .catch((err) => console.error('Notification error (company rejected):', err));
-    }
-  } catch (error) {
-    if (error.name === 'ZodError') {
-      return res.status(400).json({ error: error.issues[0].message });
-    }
-
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.getJobs = async (req, res) => {
-  try {
-    const { status, search, location, jobType, page = 1, limit = 10 } = req.query;
-
-    if (status && !JOB_STATUSES.includes(status)) {
-      return res.status(400).json({ error: `Status must be one of: ${JOB_STATUSES.join(', ')}` });
-    }
-
-    if (jobType && !JOB_TYPES.includes(jobType)) {
-      return res.status(400).json({ error: `Job type must be one of: ${JOB_TYPES.join(', ')}` });
-    }
-
-    const query = {};
-
-    if (status) {
-      query.status = status;
-    }
-
-    if (search) {
-      const escapedSearch = escapeRegex(search);
-      query.$or = [
-        { title: { $regex: escapedSearch, $options: 'i' } },
-        { description: { $regex: escapedSearch, $options: 'i' } }
-      ];
-    }
-
-    if (location) {
-      const escapedLocation = escapeRegex(location);
-      query.location = { $regex: escapedLocation, $options: 'i' };
-    }
-
-    if (jobType) {
-      query.jobType = jobType;
-    }
-
-    const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 10));
-    const skip = (pageNum - 1) * limitNum;
-
-    const [jobs, total] = await Promise.all([
-      JobPosting.find(query)
-        .populate('companyId', 'name')
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limitNum),
-      JobPosting.countDocuments(query)
-    ]);
-
-    const result = jobs.map(job => ({
-      id: job._id.toString(),
-      companyId: job.companyId._id.toString(),
-      title: job.title,
-      description: job.description,
-      requirements: job.requirements,
-      location: job.location,
-      jobType: job.jobType,
-      salaryRange: job.salaryRange,
-      deadline: job.deadline,
-      status: job.status,
-      rejectionReason: job.rejectionReason,
-      createdAt: job.createdAt,
-      approvedAt: job.approvedAt,
-      company: {
-        id: job.companyId._id.toString(),
-        name: job.companyId.name
-      }
-    }));
-
-    res.json({
-      jobs: result,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        totalPages: Math.ceil(total / limitNum)
-      }
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.getJob = async (req, res) => {
-  try {
-    const { jobId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(jobId)) {
-      return res.status(400).json({ error: 'Invalid job ID format' });
-    }
-
-    const job = await JobPosting.findById(jobId)
-      .populate('companyId', 'name email');
-
-    if (!job) {
-      return res.status(404).json({ error: 'Job not found' });
-    }
-
-    res.json({
-      id: job._id.toString(),
-      companyId: job.companyId._id.toString(),
-      title: job.title,
-      description: job.description,
-      requirements: job.requirements,
-      location: job.location,
-      jobType: job.jobType,
-      salaryRange: job.salaryRange,
-      deadline: job.deadline,
-      status: job.status,
-      rejectionReason: job.rejectionReason,
-      createdAt: job.createdAt,
-      approvedAt: job.approvedAt,
-      company: {
-        id: job.companyId._id.toString(),
-        name: job.companyId.name,
-        email: job.companyId.email
-      }
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.updateJob = async (req, res) => {
-  try {
-    const { jobId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(jobId)) {
-      return res.status(400).json({ error: 'Invalid job ID format' });
-    }
-
-    const parsed = updateJobStatusSchema.parse(req.body);
-
-    const job = await JobPosting.findById(jobId);
-
-    if (!job) {
-      return res.status(404).json({ error: 'Job not found' });
-    }
-
-    const previousStatus = job.status;
-
-    const updateFields = { status: parsed.status };
-
-    if (parsed.status === 'approved') {
-      updateFields.approvedAt = new Date();
-      updateFields.rejectionReason = null;
-    } else if (parsed.status === 'rejected') {
-      updateFields.rejectionReason = parsed.rejectionReason || null;
-      updateFields.approvedAt = null;
-    } else if (parsed.status === 'pending') {
-      updateFields.approvedAt = null;
-    }
-    // For 'closed', keep existing approvedAt and rejectionReason
-
-    const updatedJob = await JobPosting.findByIdAndUpdate(
-      jobId,
-      { $set: updateFields },
-      { returnDocument: 'after' }
-    ).populate('companyId', 'name userId');
-
-    // If job is closed, reject all pending/reviewed applications
-    if (parsed.status === 'closed') {
-      await Application.updateMany(
-        {
-          jobPostingId: jobId,
-          status: { $in: ['pending', 'reviewed'] }
-        },
-        {
-          $set: {
-            status: 'rejected',
-            rejectionReason: 'Job posting has been closed'
-          }
-        }
-      );
-    }
-
-    res.json({
-      id: updatedJob._id.toString(),
-      companyId: updatedJob.companyId._id.toString(),
-      title: updatedJob.title,
-      description: updatedJob.description,
-      requirements: updatedJob.requirements,
-      location: updatedJob.location,
-      jobType: updatedJob.jobType,
-      salaryRange: updatedJob.salaryRange,
-      deadline: updatedJob.deadline,
-      status: updatedJob.status,
-      rejectionReason: updatedJob.rejectionReason,
-      createdAt: updatedJob.createdAt,
-      approvedAt: updatedJob.approvedAt,
-      company: {
-        id: updatedJob.companyId._id.toString(),
-        name: updatedJob.companyId.name
-      }
-    });
-
-    const statusChanged = previousStatus !== updatedJob.status;
-
-    if (statusChanged && parsed.status === 'approved') {
-      const companyUserId = updatedJob.companyId?.userId;
-
-      notificationService
-        .notifyJobApproved(companyUserId, { jobTitle: updatedJob.title || 'Job Posting' })
-        .catch((error) => {
-          console.error('Notification error (job approved):', error);
+// ─── Dashboard ──────────────────────────────────────────────────────────────
+exports.getDashboard = async (_req, res) => {
+    try {
+        const [{ count: totalCompanies }, { count: pendingCompanies }, { count: totalJobs }, { count: pendingJobs }, { count: activeJobs }, { count: totalStudents }, { count: totalApplications }, { count: totalHires }] = await Promise.all([
+            supabase.from('companies').select('*', { count: 'exact', head: true }),
+            supabase.from('companies').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+            supabase.from('job_postings').select('*', { count: 'exact', head: true }),
+            supabase.from('job_postings').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+            supabase.from('job_postings').select('*', { count: 'exact', head: true }).eq('status', 'approved'),
+            supabase.from('students').select('*', { count: 'exact', head: true }),
+            supabase.from('applications').select('*', { count: 'exact', head: true }),
+            supabase.from('applications').select('*', { count: 'exact', head: true }).eq('status', 'hired')
+        ]);
+        res.json({
+            pendingCompanies: pendingCompanies ?? 0,
+            totalCompanies: totalCompanies ?? 0,
+            pendingJobs: pendingJobs ?? 0,
+            activeJobs: activeJobs ?? 0,
+            totalJobs: totalJobs ?? 0,
+            totalStudents: totalStudents ?? 0,
+            totalApplications: totalApplications ?? 0,
+            totalHires: totalHires ?? 0
         });
     }
-  } catch (error) {
-    if (error.name === 'ZodError') {
-      return res.status(400).json({ error: error.issues[0].message });
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
     }
-
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
 };
-
-exports.getApplications = async (req, res) => {
-  try {
-    const { status, search, jobType, location, page = 1, limit = 10 } = req.query;
-
-    if (status && !APPLICATION_STATUSES.includes(status)) {
-      return res.status(400).json({ error: `Status must be one of: ${APPLICATION_STATUSES.join(', ')}` });
-    }
-
-    if (jobType && !JOB_TYPES.includes(jobType)) {
-      return res.status(400).json({ error: `Job type must be one of: ${JOB_TYPES.join(', ')}` });
-    }
-
-    const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 10));
-    const skip = (pageNum - 1) * limitNum;
-
-    // Build aggregation pipeline
-    const pipeline = [
-      // Lookup student
-      {
-        $lookup: {
-          from: 'students',
-          localField: 'studentId',
-          foreignField: '_id',
-          as: 'student'
+// ─── Company Management ────────────────────────────────────────────────────
+exports.getCompanies = async (req, res) => {
+    try {
+        const { status, search, page = 1, limit = 20 } = req.query;
+        if (status && !COMPANY_STATUSES.includes(status)) {
+            return res.status(400).json({ error: 'Status must be pending, approved, or rejected' });
         }
-      },
-      { $unwind: '$student' },
-      // Lookup job posting
-      {
-        $lookup: {
-          from: 'jobpostings',
-          localField: 'jobPostingId',
-          foreignField: '_id',
-          as: 'jobPosting'
+        const pageNum = Math.max(1, parseInt(page) || 1);
+        const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 20));
+        let query = supabase.from('companies').select('*, users ( username, is_active )');
+        if (status)
+            query = query.eq('status', status);
+        const { data: companies, error } = await query.order('created_at', { ascending: false });
+        if (error)
+            throw error;
+        let filtered = companies || [];
+        if (search) {
+            const term = String(search).toLowerCase();
+            filtered = filtered.filter((c) => (c.name || '').toLowerCase().includes(term) ||
+                (c.email || '').toLowerCase().includes(term) ||
+                (c.users?.username || '').toLowerCase().includes(term));
         }
-      },
-      { $unwind: '$jobPosting' },
-      // Lookup company
-      {
-        $lookup: {
-          from: 'companies',
-          localField: 'jobPosting.companyId',
-          foreignField: '_id',
-          as: 'company'
-        }
-      },
-      { $unwind: '$company' }
-    ];
-
-    // Build match conditions
-    const matchConditions = {};
-
-    if (status) {
-      matchConditions.status = status;
+        const total = filtered.length;
+        const paged = filtered.slice((pageNum - 1) * limitNum, (pageNum - 1) * limitNum + limitNum);
+        const result = paged.map((c) => ({
+            id: c.id,
+            username: c.users?.username,
+            isActive: c.users?.is_active !== false,
+            name: c.name,
+            email: c.email,
+            status: c.status,
+            rejectionReason: c.rejection_reason,
+            createdAt: c.created_at,
+            approvedAt: c.approved_at
+        }));
+        res.json({ companies: result, pagination: { page: pageNum, limit: limitNum, total, totalPages: Math.ceil(total / limitNum) } });
     }
-
-    if (jobType) {
-      matchConditions['jobPosting.jobType'] = jobType;
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
     }
-
-    if (location) {
-      const escapedLocation = escapeRegex(location);
-      matchConditions['jobPosting.location'] = { $regex: escapedLocation, $options: 'i' };
-    }
-
-    if (search) {
-      const escapedSearch = escapeRegex(search);
-      matchConditions.$or = [
-        { 'student.fullName': { $regex: escapedSearch, $options: 'i' } },
-        { 'student.email': { $regex: escapedSearch, $options: 'i' } },
-        { 'jobPosting.title': { $regex: escapedSearch, $options: 'i' } }
-      ];
-    }
-
-    if (Object.keys(matchConditions).length > 0) {
-      pipeline.push({ $match: matchConditions });
-    }
-
-    // Count total before pagination
-    const countPipeline = [...pipeline, { $count: 'total' }];
-    const countResult = await Application.aggregate(countPipeline);
-    const total = countResult[0]?.total || 0;
-
-    // Add sorting and pagination
-    pipeline.push(
-      { $sort: { createdAt: -1 } },
-      { $skip: skip },
-      { $limit: limitNum },
-      {
-        $project: {
-          _id: 1,
-          studentId: 1,
-          jobPostingId: 1,
-          status: 1,
-          createdAt: 1,
-          reviewedAt: 1,
-          rejectionReason: 1,
-          'student._id': 1,
-          'student.fullName': 1,
-          'student.email': 1,
-          'student.profileLink': 1,
-          'student.isHired': 1,
-          'jobPosting._id': 1,
-          'jobPosting.title': 1,
-          'jobPosting.location': 1,
-          'jobPosting.jobType': 1,
-          'company._id': 1,
-          'company.name': 1
-        }
-      }
-    );
-
-    const applications = await Application.aggregate(pipeline);
-
-    const result = applications.map(app => ({
-      id: app._id.toString(),
-      studentId: app.studentId.toString(),
-      jobPostingId: app.jobPostingId.toString(),
-      status: app.status,
-      createdAt: app.createdAt,
-      reviewedAt: app.reviewedAt,
-      rejectionReason: app.rejectionReason,
-      student: {
-        id: app.student._id.toString(),
-        fullName: app.student.fullName,
-        email: app.student.email,
-        profileLink: app.student.profileLink,
-        isHired: app.student.isHired
-      },
-      jobPosting: {
-        id: app.jobPosting._id.toString(),
-        title: app.jobPosting.title,
-        location: app.jobPosting.location,
-        jobType: app.jobPosting.jobType,
-        company: {
-          id: app.company._id.toString(),
-          name: app.company.name
-        }
-      }
-    }));
-
-    res.json({
-      applications: result,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        totalPages: Math.ceil(total / limitNum)
-      }
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
 };
-
+exports.updateCompany = async (req, res) => {
+    try {
+        const { companyId } = req.params;
+        if (!isValidUuid(companyId)) {
+            return res.status(400).json({ error: 'Invalid company ID format' });
+        }
+        const parsed = updateCompanyStatusSchema.parse(req.body);
+        const { data: company } = await supabase.from('companies').select('*').eq('id', companyId).maybeSingle();
+        if (!company)
+            return res.status(404).json({ error: 'Company not found' });
+        const previousStatus = company.status;
+        const updateFields = { status: parsed.status };
+        if (parsed.status === 'approved') {
+            updateFields.approved_at = new Date().toISOString();
+            updateFields.rejection_reason = null;
+        }
+        else if (parsed.status === 'rejected') {
+            updateFields.rejection_reason = parsed.rejectionReason;
+            updateFields.approved_at = null;
+        }
+        else if (parsed.status === 'pending') {
+            updateFields.approved_at = null;
+        }
+        const { data: updatedCompany, error } = await supabase
+            .from('companies')
+            .update(updateFields)
+            .eq('id', companyId)
+            .select()
+            .single();
+        if (error)
+            throw error;
+        const { data: user } = await supabase.from('users').select('username').eq('id', updatedCompany.user_id).maybeSingle();
+        res.json({
+            id: updatedCompany.id,
+            username: user?.username,
+            name: updatedCompany.name,
+            email: updatedCompany.email,
+            status: updatedCompany.status,
+            rejectionReason: updatedCompany.rejection_reason,
+            createdAt: updatedCompany.created_at,
+            approvedAt: updatedCompany.approved_at
+        });
+        const statusChanged = previousStatus !== updatedCompany.status;
+        const companyUserId = updatedCompany.user_id;
+        if (statusChanged && parsed.status === 'approved') {
+            emailService
+                .sendCompanyApprovedEmail(updatedCompany.email, { companyName: updatedCompany.name, recipientName: updatedCompany.name }, { userId: companyUserId })
+                .catch((error) => console.error('Failed to send company approval email', error));
+            notificationService
+                .notifyCompanyApproved(companyUserId, { companyName: updatedCompany.name })
+                .catch((err) => console.error('Notification error (company approved):', err));
+        }
+        else if (statusChanged && parsed.status === 'rejected') {
+            emailService
+                .sendCompanyRejectedEmail(updatedCompany.email, {
+                companyName: updatedCompany.name,
+                recipientName: updatedCompany.name,
+                reason: parsed.rejectionReason || updatedCompany.rejection_reason
+            }, { userId: companyUserId })
+                .catch((error) => console.error('Failed to send company rejection email', error));
+            notificationService
+                .notifyCompanyRejected(companyUserId, {
+                companyName: updatedCompany.name,
+                rejectionReason: parsed.rejectionReason || updatedCompany.rejection_reason
+            })
+                .catch((err) => console.error('Notification error (company rejected):', err));
+        }
+    }
+    catch (error) {
+        if (error.name === 'ZodError') {
+            return res.status(400).json({ error: error.issues[0].message });
+        }
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
 exports.getCompanyProfileAdmin = async (req, res) => {
-  try {
-    const { companyId } = req.params;
-
-    const company = await Company.findById(companyId).populate('userId', 'isActive');
-
-    if (!company) {
-      return res.status(404).json({ message: 'Company not found' });
+    try {
+        const { companyId } = req.params;
+        const { data: company } = await supabase.from('companies').select('*, users ( is_active )').eq('id', companyId).maybeSingle();
+        if (!company) {
+            return res.status(404).json({ message: 'Company not found' });
+        }
+        const { users, ...companyObj } = company;
+        companyObj.isActive = users?.is_active !== false;
+        return res.json(companyObj);
     }
-
-    const companyObj = company.toObject();
-    companyObj.isActive = company.userId?.isActive !== false;
-
-    return res.json(companyObj);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
+    catch (error) {
+        return res.status(500).json({ message: error.message });
+    }
 };
-
 exports.updateCompanyProfileAdmin = async (req, res) => {
-  try {
-    const { companyId } = req.params;
-    const {
-      description,
-      website,
-      industry,
-      size,
-      foundedYear,
-      socialLinks
-    } = req.body || {};
-
-    if (!mongoose.Types.ObjectId.isValid(companyId)) {
-      return res.status(400).json({ message: 'Invalid company ID format' });
-    }
-
-    const isValidUrl = (value) => {
-      if (!value) return true;
-      try {
-        new URL(value);
-        return true;
-      } catch (err) {
-        return false;
-      }
-    };
-
-    if (!isValidUrl(website)) {
-      return res.status(400).json({ message: 'Invalid website URL' });
-    }
-
-    if (!isValidUrl(socialLinks?.linkedin)) {
-      return res.status(400).json({ message: 'Invalid LinkedIn URL' });
-    }
-
-    if (!isValidUrl(socialLinks?.twitter)) {
-      return res.status(400).json({ message: 'Invalid Twitter URL' });
-    }
-
-    const company = await Company.findById(companyId);
-
-    if (!company) {
-      return res.status(404).json({ message: 'Company not found' });
-    }
-
-    if (description !== undefined) company.description = description;
-    if (website !== undefined) company.website = website;
-    if (industry !== undefined) company.industry = industry;
-    if (size !== undefined) company.size = size;
-    if (foundedYear !== undefined) company.foundedYear = foundedYear;
-
-    if (socialLinks !== undefined) {
-      company.socialLinks = {
-        linkedin: socialLinks?.linkedin ?? company.socialLinks?.linkedin ?? null,
-        twitter: socialLinks?.twitter ?? company.socialLinks?.twitter ?? null
-      };
-    }
-
-    await company.save();
-    invalidatePublicCompanyProfileCache(company._id);
-
-    return res.status(200).json(company);
-  } catch (error) {
-    return res.status(500).json({ message: error.message });
-  }
-};
-
-exports.updateApplication = async (req, res) => {
-  try {
-    const { appId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(appId)) {
-      return res.status(400).json({ error: 'Invalid application ID format' });
-    }
-
-    const parsed = adminUpdateApplicationSchema.parse(req.body);
-
-    const application = await Application.findById(appId);
-
-    if (!application) {
-      return res.status(404).json({ error: 'Application not found' });
-    }
-
-    if (application.status === 'withdrawn') {
-      return res.status(400).json({ error: 'Cannot process withdrawn applications' });
-    }
-
-    if (application.status === 'hired') {
-      return res.status(400).json({ error: 'Cannot modify applications that have been hired' });
-    }
-
-    const updateFields = {
-      status: parsed.status
-    };
-
-    if (parsed.status === 'reviewed') {
-      updateFields.reviewedAt = new Date();
-      updateFields.rejectionReason = null;
-      updateFields.rejectionSource = null;
-    } else if (parsed.status === 'rejected') {
-      // Don't set reviewedAt when admin rejects - this keeps it hidden from companies
-      updateFields.rejectionReason = parsed.rejectionReason || null;
-      updateFields.rejectionSource = 'admin';
-    }
-
-    const updatedApp = await Application.findByIdAndUpdate(
-      appId,
-      { $set: updateFields },
-      { returnDocument: 'after' }
-    )
-      .populate('studentId', 'fullName email profileLink isHired userId')
-      .populate({
-        path: 'jobPostingId',
-        select: 'title companyId',
-        populate: {
-          path: 'companyId',
-          select: 'name userId'
+    try {
+        const { companyId } = req.params;
+        const { description, website, industry, size, foundedYear, socialLinks } = req.body || {};
+        if (!isValidUuid(companyId)) {
+            return res.status(400).json({ message: 'Invalid company ID format' });
         }
-      });
-
-    const responsePayload = {
-      id: updatedApp._id.toString(),
-      studentId: updatedApp.studentId._id.toString(),
-      jobPostingId: updatedApp.jobPostingId._id.toString(),
-      status: updatedApp.status,
-      createdAt: updatedApp.createdAt,
-      reviewedAt: updatedApp.reviewedAt,
-      rejectionReason: updatedApp.rejectionReason,
-      student: {
-        id: updatedApp.studentId._id.toString(),
-        fullName: updatedApp.studentId.fullName,
-        email: updatedApp.studentId.email,
-        profileLink: updatedApp.studentId.profileLink,
-        isHired: updatedApp.studentId.isHired
-      },
-      jobPosting: {
-        id: updatedApp.jobPostingId._id.toString(),
-        title: updatedApp.jobPostingId.title,
-        company: {
-          id: updatedApp.jobPostingId.companyId._id.toString(),
-          name: updatedApp.jobPostingId.companyId.name
-        }
-      }
-    };
-
-    res.json(responsePayload);
-
-    if (parsed.status === 'reviewed') {
-      emailService
-        .sendApplicationStatusEmail(
-          updatedApp.studentId.email,
-          {
-            status: 'approved',
-            jobTitle: updatedApp.jobPostingId.title,
-            companyName: updatedApp.jobPostingId.companyId.name,
-            studentName: updatedApp.studentId.fullName
-          },
-          { userId: updatedApp.studentId.userId }
-        )
-        .catch((error) => console.error('Failed to send application approval email', error));
-
-      notificationService
-        .notifyApplicationApproved(updatedApp.studentId.userId, {
-          jobTitle: updatedApp.jobPostingId.title,
-          companyName: updatedApp.jobPostingId.companyId.name
-        })
-        .catch((err) => console.error('Notification error (app approved):', err));
-
-      // Notify company about the new application (after admin approval)
-      if (updatedApp.jobPostingId.companyId?.userId) {
-        notificationService
-          .notifyApplicationReceived(updatedApp.jobPostingId.companyId.userId, {
-            jobTitle: updatedApp.jobPostingId.title,
-            studentName: updatedApp.studentId.fullName
-          })
-          .catch((err) => console.error('Notification error (app received by company):', err));
-      }
-    } else if (parsed.status === 'rejected') {
-      emailService
-        .sendApplicationStatusEmail(
-          updatedApp.studentId.email,
-          {
-            status: 'rejected',
-            jobTitle: updatedApp.jobPostingId.title,
-            companyName: updatedApp.jobPostingId.companyId.name,
-            studentName: updatedApp.studentId.fullName,
-            reason: updatedApp.rejectionReason
-          },
-          { userId: updatedApp.studentId.userId }
-        )
-        .catch((error) => console.error('Failed to send application rejection email', error));
-
-      notificationService
-        .notifyApplicationRejected(updatedApp.studentId.userId, {
-          jobTitle: updatedApp.jobPostingId.title,
-          companyName: updatedApp.jobPostingId.companyId.name,
-          reason: updatedApp.rejectionReason
-        })
-        .catch((err) => console.error('Notification error (app rejected):', err));
-    }
-  } catch (error) {
-    if (error.name === 'ZodError') {
-      return res.status(400).json({ error: error.issues[0].message });
-    }
-
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-// ─── Student Management ───────────────────────────────────────────────────────
-
-exports.getStudents = async (req, res) => {
-  try {
-    const {
-      subscriptionTier,
-      hasActiveApplications,
-      isHired,
-      hasResume,
-      hasVideo,
-      search,
-      page = 1,
-      limit = 20
-    } = req.query;
-
-    const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 20));
-    const skip = (pageNum - 1) * limitNum;
-
-    // Build aggregation pipeline
-    const pipeline = [];
-
-    // Match conditions for student fields
-    const matchConditions = {};
-
-    if (subscriptionTier && ['free', 'paid'].includes(subscriptionTier)) {
-      matchConditions.subscriptionTier = subscriptionTier;
-    }
-
-    if (isHired !== undefined) {
-      matchConditions.isHired = isHired === 'true';
-    }
-
-    if (hasResume !== undefined) {
-      if (hasResume === 'true') {
-        matchConditions.resumeUrl = { $ne: null };
-      } else {
-        matchConditions.resumeUrl = null;
-      }
-    }
-
-    if (hasVideo !== undefined) {
-      if (hasVideo === 'true') {
-        matchConditions.introVideoUrl = { $ne: null };
-      } else {
-        matchConditions.introVideoUrl = null;
-      }
-    }
-
-    if (search) {
-      const escapedSearch = escapeRegex(search);
-      matchConditions.$or = [
-        { fullName: { $regex: escapedSearch, $options: 'i' } },
-        { email: { $regex: escapedSearch, $options: 'i' } },
-        { studentId: { $regex: escapedSearch, $options: 'i' } }
-      ];
-    }
-
-    if (Object.keys(matchConditions).length > 0) {
-      pipeline.push({ $match: matchConditions });
-    }
-
-    // Lookup user to get isActive
-    pipeline.push({
-      $lookup: {
-        from: 'users',
-        localField: 'userId',
-        foreignField: '_id',
-        as: 'user'
-      }
-    });
-    pipeline.push({ $unwind: { path: '$user', preserveNullAndEmptyArrays: true } });
-
-    // Lookup applications to count active ones
-    pipeline.push({
-      $lookup: {
-        from: 'applications',
-        localField: '_id',
-        foreignField: 'studentId',
-        as: 'applications'
-      }
-    });
-
-    // Add computed fields
-    pipeline.push({
-      $addFields: {
-        totalApplications: { $size: '$applications' },
-        activeApplications: {
-          $size: {
-            $filter: {
-              input: '$applications',
-              cond: { $in: ['$$this.status', ['pending', 'reviewed']] }
+        const isValidUrl = (value) => {
+            if (!value)
+                return true;
+            try {
+                new URL(value);
+                return true;
             }
-          }
-        }
-      }
-    });
-
-    // Filter by hasActiveApplications if specified
-    if (hasActiveApplications !== undefined) {
-      if (hasActiveApplications === 'true') {
-        pipeline.push({ $match: { activeApplications: { $gt: 0 } } });
-      } else {
-        pipeline.push({ $match: { activeApplications: 0 } });
-      }
-    }
-
-    // Count total before pagination
-    const countPipeline = [...pipeline, { $count: 'total' }];
-    const countResult = await Student.aggregate(countPipeline);
-    const total = countResult[0]?.total || 0;
-
-    // Add sorting and pagination
-    pipeline.push(
-      { $sort: { createdAt: -1 } },
-      { $skip: skip },
-      { $limit: limitNum },
-      {
-        $project: {
-          _id: 1,
-          studentId: 1,
-          fullName: 1,
-          email: 1,
-          subscriptionTier: 1,
-          isHired: 1,
-          isActive: '$user.isActive',
-          hasResume: { $cond: [{ $ne: ['$resumeUrl', null] }, true, false] },
-          hasVideo: { $cond: [{ $ne: ['$introVideoUrl', null] }, true, false] },
-          totalApplications: 1,
-          activeApplications: 1,
-          createdAt: 1
-        }
-      }
-    );
-
-    const students = await Student.aggregate(pipeline);
-
-    const result = students.map(s => ({
-      id: s._id.toString(),
-      studentId: s.studentId || null,
-      fullName: s.fullName,
-      email: s.email,
-      subscriptionTier: s.subscriptionTier,
-      isHired: s.isHired,
-      isActive: s.isActive !== false,
-      hasResume: s.hasResume,
-      hasVideo: s.hasVideo,
-      totalApplications: s.totalApplications,
-      activeApplications: s.activeApplications,
-      createdAt: s.createdAt
-    }));
-
-    res.json({
-      students: result,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        totalPages: Math.ceil(total / limitNum)
-      }
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.getStudentProfile = async (req, res) => {
-  try {
-    const { studentId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(studentId)) {
-      return res.status(400).json({ error: 'Invalid student ID format' });
-    }
-
-    const student = await Student.findById(studentId)
-      .populate('userId', 'isActive')
-      .populate({
-        path: 'currentSubscriptionId',
-        populate: {
-          path: 'serviceId',
-          select: 'name description price billingCycle features'
-        }
-      });
-
-    if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
-    }
-
-    // Generate presigned URLs for media files
-    const [resumeUrl, introVideoUrl] = await Promise.all([
-      student.resumeUrl ? getPresignedUrl(student.resumeUrl) : null,
-      student.introVideoUrl ? getPresignedUrl(student.introVideoUrl) : null
-    ]);
-
-    // Get payment history with detailed type information
-    const payments = await PaymentRecord.find({ studentId: student._id })
-      .populate({
-        path: 'subscriptionId',
-        populate: {
-          path: 'serviceId',
-          select: 'name price'
-        }
-      })
-      .populate('serviceId', 'name price')
-      .sort({ paymentDate: -1 });
-
-    // Get pay-per-job purchases for this student to enrich payment data
-    const PayPerJobPurchase = require('../models/PayPerJobPurchase');
-    const JobPosting = require('../models/JobPosting');
-    const payPerJobPurchases = await PayPerJobPurchase.find({
-      studentId: student._id
-    }).populate('jobPostingId', 'title').lean();
-    // Map by razorpayOrderId for lookup
-    const payPerJobByOrderId = new Map(
-      payPerJobPurchases
-        .filter(p => p.razorpayOrderId)
-        .map(p => [p.razorpayOrderId, p])
-    );
-
-    // Get subscription addons to enrich payment data
-    const SubscriptionAddon = require('../models/SubscriptionAddon');
-    const subscriptionAddons = await SubscriptionAddon.find({
-      paymentRecordId: { $in: payments.map(p => p._id) }
-    }).populate('addonId', 'name type').lean();
-    const addonByPaymentId = new Map(
-      subscriptionAddons.map(sa => [sa.paymentRecordId.toString(), sa])
-    );
-
-    // Get all applications with job details
-    const applications = await Application.find({ studentId: student._id })
-      .populate({
-        path: 'jobPostingId',
-        select: 'title location jobType salaryRange status',
-        populate: {
-          path: 'companyId',
-          select: 'name'
-        }
-      })
-      .sort({ createdAt: -1 });
-
-    res.json({
-      id: student._id,
-      studentId: student.studentId || null,
-      fullName: student.fullName,
-      email: student.email,
-      isActive: student.userId?.isActive !== false,
-      isDGShipping: student.isDGShipping || 'no',
-      profileLink: student.profileLink || null,
-      bio: student.bio || null,
-      location: student.location || null,
-      availableFrom: student.availableFrom || null,
-      skills: student.skills || [],
-      education: student.education || [],
-      experience: student.experience || [],
-      resumeUrl,
-      introVideoUrl,
-      isHired: student.isHired,
-      createdAt: student.createdAt,
-      subscription: {
-        tier: student.subscriptionTier,
-        current: student.currentSubscriptionId ? {
-          id: student.currentSubscriptionId._id,
-          status: student.currentSubscriptionId.status,
-          startDate: student.currentSubscriptionId.startDate,
-          endDate: student.currentSubscriptionId.endDate,
-          autoRenew: student.currentSubscriptionId.autoRenew,
-          plan: student.currentSubscriptionId.serviceId ? {
-            id: student.currentSubscriptionId.serviceId._id,
-            name: student.currentSubscriptionId.serviceId.name,
-            description: student.currentSubscriptionId.serviceId.description,
-            price: student.currentSubscriptionId.serviceId.price,
-            billingCycle: student.currentSubscriptionId.serviceId.billingCycle,
-            features: student.currentSubscriptionId.serviceId.features
-          } : null
-        } : null
-      },
-      payments: payments.map(p => {
-        // Determine payment type from gatewayResponse or related records
-        let paymentType = 'unknown';
-        let typeLabel = 'Unknown';
-        let details = null;
-
-        const gatewayType = p.gatewayResponse?.type;
-        // Get order ID from either field or gatewayResponse
-        const orderId = p.razorpayOrderId || p.gatewayResponse?.orderId;
-
-        if (gatewayType === 'pay_per_job') {
-          paymentType = 'pay-per-job';
-          typeLabel = 'Pay Per Job';
-          // Look up by order ID from gatewayResponse
-          const purchase = payPerJobByOrderId.get(orderId);
-          if (purchase?.jobPostingId) {
-            details = {
-              jobId: purchase.jobPostingId._id,
-              jobTitle: purchase.jobPostingId.title
-            };
-          }
-        } else if (gatewayType === 'zone_addon') {
-          paymentType = 'zone-addon';
-          typeLabel = 'Zone Addon';
-          const addon = addonByPaymentId.get(p._id.toString());
-          if (addon?.addonId) {
-            details = {
-              addonId: addon.addonId._id,
-              addonName: addon.addonId.name
-            };
-          }
-        } else if (p.subscriptionId?.serviceId) {
-          // Has subscription = plan purchase (completed or pending)
-          paymentType = 'plan';
-          typeLabel = 'Plan Purchase';
-          details = {
-            planId: p.subscriptionId.serviceId._id,
-            planName: p.subscriptionId.serviceId.name,
-            planPrice: p.subscriptionId.serviceId.price
-          };
-        } else if (p.serviceId) {
-          // Has serviceId but no subscription = pending plan purchase
-          paymentType = 'plan';
-          typeLabel = 'Plan Purchase';
-          details = {
-            planId: p.serviceId._id,
-            planName: p.serviceId.name,
-            planPrice: p.serviceId.price
-          };
-        }
-
-        return {
-          id: p._id,
-          type: paymentType,
-          typeLabel,
-          amount: p.amount,
-          currency: p.currency,
-          status: p.status,
-          paymentDate: p.paymentDate,
-          paymentMethod: p.paymentMethod,
-          razorpayOrderId: orderId || null,
-          razorpayPaymentId: p.razorpayPaymentId || null,
-          transactionId: p.razorpayPaymentId || p.transactionId,
-          details
+            catch {
+                return false;
+            }
         };
-      }),
-      applications: applications.map(app => ({
-        id: app._id,
-        status: app.status,
-        createdAt: app.createdAt,
-        reviewedAt: app.reviewedAt,
-        rejectionReason: app.rejectionReason,
-        job: app.jobPostingId ? {
-          id: app.jobPostingId._id,
-          title: app.jobPostingId.title,
-          location: app.jobPostingId.location,
-          jobType: app.jobPostingId.jobType,
-          salaryRange: app.jobPostingId.salaryRange,
-          status: app.jobPostingId.status,
-          company: app.jobPostingId.companyId ? {
-            id: app.jobPostingId.companyId._id,
-            name: app.jobPostingId.companyId.name
-          } : null
-        } : null
-      }))
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.assignStudentSubscription = async (req, res) => {
-  try {
-    const { studentId } = req.params;
-    const { serviceId } = req.body;
-
-    if (!mongoose.Types.ObjectId.isValid(studentId)) {
-      return res.status(400).json({ error: 'Invalid student ID format' });
-    }
-
-    if (!serviceId || !mongoose.Types.ObjectId.isValid(serviceId)) {
-      return res.status(400).json({ error: 'Valid service ID is required' });
-    }
-
-    const student = await Student.findById(studentId);
-
-    if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
-    }
-
-    const service = await AvailableService.findById(serviceId);
-
-    if (!service) {
-      return res.status(404).json({ error: 'Subscription plan not found' });
-    }
-
-    // Mark current subscription as exhausted if exists and is not free
-    if (student.currentSubscriptionId) {
-      const currentSub = await ActiveSubscription.findById(student.currentSubscriptionId)
-        .populate('serviceId', 'tier');
-
-      if (currentSub && currentSub.serviceId?.tier !== 'free') {
-        await ActiveSubscription.updateOne(
-          { _id: student.currentSubscriptionId },
-          { $set: { status: 'exhausted', autoRenew: false } }
-        );
-      }
-    }
-
-    const now = new Date();
-
-    // Create new quota-based subscription
-    const subscription = await ActiveSubscription.create({
-      studentId: student._id,
-      serviceId: service._id,
-      startDate: now,
-      endDate: null,
-      status: 'active',
-      autoRenew: false,
-      applicationsUsed: 0,
-      maxApplications: service.maxApplications
-    });
-
-    // Update student
-    await Student.updateOne(
-      { _id: student._id },
-      {
-        $set: {
-          currentSubscriptionId: subscription._id,
-          subscriptionTier: service.tier
+        if (!isValidUrl(website))
+            return res.status(400).json({ message: 'Invalid website URL' });
+        if (!isValidUrl(socialLinks?.linkedin))
+            return res.status(400).json({ message: 'Invalid LinkedIn URL' });
+        if (!isValidUrl(socialLinks?.twitter))
+            return res.status(400).json({ message: 'Invalid Twitter URL' });
+        const { data: company } = await supabase.from('companies').select('*').eq('id', companyId).maybeSingle();
+        if (!company)
+            return res.status(404).json({ message: 'Company not found' });
+        const updates = {};
+        if (description !== undefined)
+            updates.description = description;
+        if (website !== undefined)
+            updates.website = website;
+        if (industry !== undefined)
+            updates.industry = industry;
+        if (size !== undefined)
+            updates.size = size;
+        if (foundedYear !== undefined)
+            updates.founded_year = foundedYear;
+        if (socialLinks !== undefined) {
+            updates.social_linkedin = socialLinks?.linkedin ?? company.social_linkedin ?? null;
+            updates.social_twitter = socialLinks?.twitter ?? company.social_twitter ?? null;
         }
-      }
-    );
-
-    const populatedSubscription = await ActiveSubscription.findById(subscription._id)
-      .populate('serviceId', 'name description price billingCycle features tier');
-
-    res.json({
-      success: true,
-      message: `Student assigned to ${service.name} plan`,
-      subscription: {
-        id: populatedSubscription._id,
-        status: populatedSubscription.status,
-        startDate: populatedSubscription.startDate,
-        endDate: populatedSubscription.endDate,
-        autoRenew: populatedSubscription.autoRenew,
-        plan: {
-          id: populatedSubscription.serviceId._id,
-          name: populatedSubscription.serviceId.name,
-          description: populatedSubscription.serviceId.description,
-          price: populatedSubscription.serviceId.price,
-          billingCycle: populatedSubscription.serviceId.billingCycle,
-          tier: populatedSubscription.serviceId.tier
-        }
-      }
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
+        const { data: updated, error } = await supabase.from('companies').update(updates).eq('id', companyId).select().single();
+        if (error)
+            throw error;
+        (0, companyProfileService_1.invalidatePublicCompanyProfileCache)(companyId);
+        return res.status(200).json(updated);
+    }
+    catch (error) {
+        return res.status(500).json({ message: error.message });
+    }
 };
-
-// ─── Subscription Plan Management ────────────────────────────────────────────
-
-exports.getSubscriptionPlans = async (req, res) => {
-  try {
-    const { includeInactive = 'true' } = req.query;
-
-    const filter = includeInactive === 'true' ? {} : { isActive: true };
-    const plans = await AvailableService.find(filter).sort({ displayOrder: 1, createdAt: -1 });
-
-    res.json({
-      plans: plans.map(buildSubscriptionPlanResponse)
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.getSubscriptionPlan = async (req, res) => {
-  try {
-    const { planId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(planId)) {
-      return res.status(400).json({ error: 'Invalid plan ID format' });
-    }
-
-    const plan = await AvailableService.findById(planId);
-
-    if (!plan) {
-      return res.status(404).json({ error: 'Subscription plan not found' });
-    }
-
-    res.json(buildSubscriptionPlanResponse(plan));
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.createSubscriptionPlan = async (req, res) => {
-  try {
-    const {
-      name,
-      description,
-      maxApplications,
-      price,
-      priceINR,
-      priceUSD,
-      currency,
-      discount,
-      features,
-      badge,
-      displayOrder,
-      resumeDownloads,
-      videoViews,
-      prioritySupport,
-      profileBoost,
-      applicationHighlight,
-      allZonesIncluded,
-      isActive
-    } = req.body;
-
-    if (!name || name.trim().length < 2) {
-      return res.status(400).json({ error: 'Name must be at least 2 characters' });
-    }
-
-    if (!description || description.trim().length < 10) {
-      return res.status(400).json({ error: 'Description must be at least 10 characters' });
-    }
-
-    // Use priceINR as the primary price, fallback to price
-    const inrPrice = priceINR ?? price;
-    if (inrPrice === undefined || inrPrice < 0) {
-      return res.status(400).json({ error: 'Price (INR) must be a non-negative number' });
-    }
-
-    if (priceUSD !== undefined && priceUSD !== null && priceUSD < 0) {
-      return res.status(400).json({ error: 'Price (USD) must be a non-negative number' });
-    }
-
-    if (currency && !CURRENCIES.includes(currency)) {
-      return res.status(400).json({ error: `Currency must be one of: ${CURRENCIES.join(', ')}` });
-    }
-
-    // Normalize empty string / undefined to null (null = unlimited)
-    const normalizedMaxApplications = (maxApplications === '' || maxApplications === undefined) ? null : maxApplications;
-
-    if (normalizedMaxApplications !== null && normalizedMaxApplications < 1) {
-      return res.status(400).json({ error: 'maxApplications must be at least 1, or omit it for unlimited' });
-    }
-
-    const plan = await AvailableService.create({
-      name: name.trim(),
-      description: description.trim(),
-      maxApplications: normalizedMaxApplications,
-      price: inrPrice,
-      priceINR: inrPrice,
-      priceUSD: priceUSD ?? 0,
-      currency: currency || 'INR',
-      billingCycle: 'one-time',
-      discount: discount || 0,
-      features: features || [],
-      badge: badge?.trim() || null,
-      displayOrder: displayOrder || 0,
-      resumeDownloads: resumeDownloads || null,
-      videoViews: videoViews || null,
-      prioritySupport: prioritySupport || false,
-      profileBoost: profileBoost || false,
-      applicationHighlight: applicationHighlight || false,
-      allZonesIncluded: allZonesIncluded || false,
-      isActive: isActive !== false
-    });
-
-    res.status(201).json(buildSubscriptionPlanResponse(plan));
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.updateSubscriptionPlan = async (req, res) => {
-  try {
-    const { planId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(planId)) {
-      return res.status(400).json({ error: 'Invalid plan ID format' });
-    }
-
-    const plan = await AvailableService.findById(planId);
-
-    if (!plan) {
-      return res.status(404).json({ error: 'Subscription plan not found' });
-    }
-
-    const {
-      name,
-      description,
-      maxApplications,
-      price,
-      priceINR,
-      priceUSD,
-      currency,
-      discount,
-      features,
-      badge,
-      displayOrder,
-      resumeDownloads,
-      videoViews,
-      prioritySupport,
-      profileBoost,
-      applicationHighlight,
-      allZonesIncluded,
-      isActive
-    } = req.body;
-
-    if (name !== undefined) {
-      if (name.trim().length < 2) {
-        return res.status(400).json({ error: 'Name must be at least 2 characters' });
-      }
-      plan.name = name.trim();
-    }
-
-    if (description !== undefined) {
-      if (description.trim().length < 10) {
-        return res.status(400).json({ error: 'Description must be at least 10 characters' });
-      }
-      plan.description = description.trim();
-    }
-
-    // Handle price updates - support both price and priceINR
-    if (price !== undefined || priceINR !== undefined) {
-      const newPrice = priceINR ?? price;
-      if (newPrice < 0) {
-        return res.status(400).json({ error: 'Price (INR) must be a non-negative number' });
-      }
-      plan.price = newPrice;
-      plan.priceINR = newPrice;
-    }
-
-    if (priceUSD !== undefined) {
-      if (priceUSD !== null && priceUSD < 0) {
-        return res.status(400).json({ error: 'Price (USD) must be a non-negative number' });
-      }
-      plan.priceUSD = priceUSD;
-    }
-
-    if (currency !== undefined) {
-      if (!CURRENCIES.includes(currency)) {
-        return res.status(400).json({ error: `Currency must be one of: ${CURRENCIES.join(', ')}` });
-      }
-      plan.currency = currency;
-    }
-
-    if (maxApplications !== undefined) {
-      if (plan.tier === 'free') {
-        // Free plan limit is permanently fixed at 2
-        plan.maxApplications = 2;
-      } else {
-        // Normalize empty string to null (unlimited)
-        const normalizedMax = maxApplications === '' ? null : maxApplications;
-        if (normalizedMax !== null && normalizedMax < 1) {
-          return res.status(400).json({ error: 'maxApplications must be at least 1, or null for unlimited' });
-        }
-        plan.maxApplications = normalizedMax;
-      }
-    }
-    if (discount !== undefined) plan.discount = discount;
-    if (features !== undefined) plan.features = features;
-    if (badge !== undefined) plan.badge = badge?.trim() || null;
-    if (displayOrder !== undefined) plan.displayOrder = displayOrder;
-    if (resumeDownloads !== undefined) plan.resumeDownloads = resumeDownloads || null;
-    if (videoViews !== undefined) plan.videoViews = videoViews || null;
-    if (prioritySupport !== undefined) plan.prioritySupport = prioritySupport;
-    if (profileBoost !== undefined) plan.profileBoost = profileBoost;
-    if (applicationHighlight !== undefined) plan.applicationHighlight = applicationHighlight;
-    if (allZonesIncluded !== undefined) plan.allZonesIncluded = allZonesIncluded;
-    if (isActive !== undefined) plan.isActive = isActive;
-
-    await plan.save();
-
-    res.json(buildSubscriptionPlanResponse(plan));
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.deleteSubscriptionPlan = async (req, res) => {
-  try {
-    const { planId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(planId)) {
-      return res.status(400).json({ error: 'Invalid plan ID format' });
-    }
-
-    const plan = await AvailableService.findById(planId);
-
-    if (!plan) {
-      return res.status(404).json({ error: 'Subscription plan not found' });
-    }
-
-    // Soft delete by setting isActive to false
-    plan.isActive = false;
-    await plan.save();
-
-    res.json({ success: true, message: 'Subscription plan deactivated' });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-// ─── Free Tier Configuration ─────────────────────────────────────────────────
-
-exports.getFreeTierConfig = async (req, res) => {
-  try {
-    const [features, resumeDownloads, videoViews] = await Promise.all([
-      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_FEATURES, []),
-      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_RESUME_DOWNLOADS, null),
-      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_VIDEO_VIEWS, null)
-    ]);
-
-    res.json({
-      maxApplications: 2,
-      features,
-      resumeDownloadsPerMonth: resumeDownloads,
-      videoViewsPerMonth: videoViews
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.updateFreeTierConfig = async (req, res) => {
-  try {
-    const { maxApplications, features, resumeDownloadsPerMonth, videoViewsPerMonth } = req.body;
-
-    const updates = [];
-
-    if (maxApplications !== undefined) {
-      if (maxApplications !== 2) {
-        return res.status(400).json({ error: 'Free tier max applications is fixed at 2' });
-      }
-      updates.push(
-        SystemConfig.setValue(
-          CONFIG_KEYS.FREE_TIER_MAX_APPLICATIONS,
-          2,
-          'Maximum applications allowed for free tier',
-          req.user.userId
-        )
-      );
-    }
-
-    if (features !== undefined) {
-      if (!Array.isArray(features)) {
-        return res.status(400).json({ error: 'Features must be an array' });
-      }
-      updates.push(
-        SystemConfig.setValue(
-          CONFIG_KEYS.FREE_TIER_FEATURES,
-          features,
-          'Features available for free tier',
-          req.user.userId
-        )
-      );
-    }
-
-    if (resumeDownloadsPerMonth !== undefined) {
-      updates.push(
-        SystemConfig.setValue(
-          CONFIG_KEYS.FREE_TIER_RESUME_DOWNLOADS,
-          resumeDownloadsPerMonth,
-          'Resume downloads per month for free tier',
-          req.user.userId
-        )
-      );
-    }
-
-    if (videoViewsPerMonth !== undefined) {
-      updates.push(
-        SystemConfig.setValue(
-          CONFIG_KEYS.FREE_TIER_VIDEO_VIEWS,
-          videoViewsPerMonth,
-          'Video views per month for free tier',
-          req.user.userId
-        )
-      );
-    }
-
-    if (updates.length === 0) {
-      return res.status(400).json({ error: 'No fields to update' });
-    }
-
-    await Promise.all(updates);
-
-    // Return updated config
-    const [updatedFeatures, updatedResumeDownloads, updatedVideoViews] = await Promise.all([
-      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_FEATURES, []),
-      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_RESUME_DOWNLOADS, null),
-      SystemConfig.getValue(CONFIG_KEYS.FREE_TIER_VIDEO_VIEWS, null)
-    ]);
-
-    res.json({
-      maxApplications: 2,
-      features: updatedFeatures,
-      resumeDownloadsPerMonth: updatedResumeDownloads,
-      videoViewsPerMonth: updatedVideoViews
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-// ─── Zone Management ─────────────────────────────────────────────────────────
-
-exports.getZones = async (req, res) => {
-  try {
-    const zones = await Zone.find().sort({ name: 1 }).lean();
-
-    const zonesWithCountries = await Promise.all(zones.map(async (zone) => {
-      const countries = await ZoneCountry.find({ zoneId: zone._id })
-        .select('_id countryName')
-        .sort({ countryName: 1 })
-        .lean();
-
-      return {
-        id: zone._id,
-        name: zone.name,
-        description: zone.description,
-        countries: countries.map(c => ({ id: c._id, name: c.countryName })),
-        countryCount: countries.length
-      };
-    }));
-
-    res.json({ zones: zonesWithCountries });
-  } catch (error) {
-    console.error('Get zones error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.createZone = async (req, res) => {
-  try {
-    const { name, description } = req.body;
-
-    if (!name || !description) {
-      return res.status(400).json({ error: 'Name and description are required' });
-    }
-
-    const existingZone = await Zone.findOne({ name: name.trim() });
-    if (existingZone) {
-      return res.status(409).json({ error: 'Zone with this name already exists' });
-    }
-
-    const zone = await Zone.create({
-      name: name.trim(),
-      description: description.trim()
-    });
-
-    res.status(201).json({
-      id: zone._id,
-      name: zone.name,
-      description: zone.description,
-      countries: [],
-      countryCount: 0
-    });
-  } catch (error) {
-    console.error('Create zone error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.updateZone = async (req, res) => {
-  try {
-    const { zoneId } = req.params;
-    const { name, description } = req.body;
-
-    if (!mongoose.Types.ObjectId.isValid(zoneId)) {
-      return res.status(400).json({ error: 'Invalid zone ID' });
-    }
-
-    const zone = await Zone.findById(zoneId);
-    if (!zone) {
-      return res.status(404).json({ error: 'Zone not found' });
-    }
-
-    if (name !== undefined) {
-      const existingZone = await Zone.findOne({
-        name: name.trim(),
-        _id: { $ne: zoneId }
-      });
-      if (existingZone) {
-        return res.status(409).json({ error: 'Zone with this name already exists' });
-      }
-      zone.name = name.trim();
-    }
-
-    if (description !== undefined) {
-      zone.description = description.trim();
-    }
-
-    await zone.save();
-
-    res.json({
-      id: zone._id,
-      name: zone.name,
-      description: zone.description
-    });
-  } catch (error) {
-    console.error('Update zone error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.deleteZone = async (req, res) => {
-  try {
-    const { zoneId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(zoneId)) {
-      return res.status(400).json({ error: 'Invalid zone ID' });
-    }
-
-    const planCount = await PlanZone.countDocuments({ zoneId });
-    if (planCount > 0) {
-      return res.status(400).json({
-        error: 'Cannot delete zone that is assigned to plans',
-        planCount
-      });
-    }
-
-    const countries = await ZoneCountry.find({ zoneId }).select('_id');
-    const countryIds = countries.map(c => c._id);
-
-    const JobPosting = require('../models/JobPosting');
-    const jobCount = await JobPosting.countDocuments({ countryId: { $in: countryIds } });
-    if (jobCount > 0) {
-      return res.status(400).json({
-        error: 'Cannot delete zone with countries that have jobs assigned',
-        jobCount
-      });
-    }
-
-    await ZoneCountry.deleteMany({ zoneId });
-    await Zone.findByIdAndDelete(zoneId);
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Delete zone error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.addCountryToZone = async (req, res) => {
-  try {
-    const { zoneId } = req.params;
-    const { countryName } = req.body;
-
-    if (!mongoose.Types.ObjectId.isValid(zoneId)) {
-      return res.status(400).json({ error: 'Invalid zone ID' });
-    }
-
-    if (!countryName || typeof countryName !== 'string') {
-      return res.status(400).json({ error: 'Country name is required' });
-    }
-
-    const zone = await Zone.findById(zoneId);
-    if (!zone) {
-      return res.status(404).json({ error: 'Zone not found' });
-    }
-
-    const existingCountry = await ZoneCountry.findOne({
-      countryName: countryName.trim()
-    });
-    if (existingCountry) {
-      return res.status(409).json({
-        error: 'Country already exists',
-        existingZoneId: existingCountry.zoneId
-      });
-    }
-
-    const country = await ZoneCountry.create({
-      zoneId,
-      countryName: countryName.trim()
-    });
-
-    res.status(201).json({
-      id: country._id,
-      name: country.countryName,
-      zoneId: country.zoneId
-    });
-  } catch (error) {
-    console.error('Add country to zone error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.removeCountryFromZone = async (req, res) => {
-  try {
-    const { zoneId, countryId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(zoneId) || !mongoose.Types.ObjectId.isValid(countryId)) {
-      return res.status(400).json({ error: 'Invalid zone or country ID' });
-    }
-
-    const country = await ZoneCountry.findOne({ _id: countryId, zoneId });
-    if (!country) {
-      return res.status(404).json({ error: 'Country not found in this zone' });
-    }
-
-    const JobPosting = require('../models/JobPosting');
-    const jobCount = await JobPosting.countDocuments({ countryId });
-    if (jobCount > 0) {
-      return res.status(400).json({
-        error: 'Cannot remove country that has jobs assigned',
-        jobCount
-      });
-    }
-
-    await ZoneCountry.findByIdAndDelete(countryId);
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Remove country from zone error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.getPlanZones = async (req, res) => {
-  try {
-    const { planId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(planId)) {
-      return res.status(400).json({ error: 'Invalid plan ID' });
-    }
-
-    const AvailableService = require('../models/AvailableService');
-    const plan = await AvailableService.findById(planId);
-    if (!plan) {
-      return res.status(404).json({ error: 'Plan not found' });
-    }
-
-    const planZones = await PlanZone.find({ planId })
-      .populate('zoneId', 'name description')
-      .lean();
-
-    const zones = planZones
-      .filter(pz => pz.zoneId)
-      .map(pz => ({
-        id: pz.zoneId._id,
-        name: pz.zoneId.name,
-        description: pz.zoneId.description
-      }));
-
-    res.json({
-      planId,
-      planName: plan.name,
-      allZonesIncluded: plan.allZonesIncluded,
-      zones
-    });
-  } catch (error) {
-    console.error('Get plan zones error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.setPlanZones = async (req, res) => {
-  try {
-    const { planId } = req.params;
-    const { zoneIds, allZonesIncluded } = req.body;
-
-    if (!mongoose.Types.ObjectId.isValid(planId)) {
-      return res.status(400).json({ error: 'Invalid plan ID' });
-    }
-
-    const AvailableService = require('../models/AvailableService');
-    const plan = await AvailableService.findById(planId);
-    if (!plan) {
-      return res.status(404).json({ error: 'Plan not found' });
-    }
-
-    if (typeof allZonesIncluded === 'boolean') {
-      plan.allZonesIncluded = allZonesIncluded;
-      await plan.save();
-    }
-
-    if (plan.allZonesIncluded) {
-      await PlanZone.deleteMany({ planId });
-      return res.json({
-        planId,
-        planName: plan.name,
-        allZonesIncluded: true,
-        zones: []
-      });
-    }
-
-    if (!Array.isArray(zoneIds)) {
-      return res.status(400).json({ error: 'zoneIds must be an array' });
-    }
-
-    const validZoneIds = zoneIds.filter(id => mongoose.Types.ObjectId.isValid(id));
-    const zones = await Zone.find({ _id: { $in: validZoneIds } });
-
-    if (zones.length !== validZoneIds.length) {
-      return res.status(400).json({ error: 'Some zone IDs are invalid' });
-    }
-
-    await PlanZone.deleteMany({ planId });
-
-    if (validZoneIds.length > 0) {
-      const planZonesDocs = validZoneIds.map(zoneId => ({
-        planId,
-        zoneId
-      }));
-      await PlanZone.insertMany(planZonesDocs);
-    }
-
-    res.json({
-      planId,
-      planName: plan.name,
-      allZonesIncluded: plan.allZonesIncluded,
-      zones: zones.map(z => ({
-        id: z._id,
-        name: z.name,
-        description: z.description
-      }))
-    });
-  } catch (error) {
-    console.error('Set plan zones error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-// ===========================
-// Addon Management
-// ===========================
-
-exports.getAddons = async (req, res) => {
-  try {
-    const Addon = require('../models/Addon');
-    const addons = await Addon.find().sort({ type: 1, name: 1 }).lean();
-
-    const formattedAddons = addons.map(a => ({
-      id: a._id,
-      name: a.name,
-      type: a.type,
-      priceINR: a.priceINR,
-      priceUSD: a.priceUSD,
-      zoneCount: a.zoneCount,
-      jobCreditCount: a.jobCreditCount,
-      unlockAllZones: a.unlockAllZones,
-      createdAt: a.createdAt
-    }));
-
-    res.json({ addons: formattedAddons });
-  } catch (error) {
-    console.error('Get addons error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.createAddon = async (req, res) => {
-  try {
-    const Addon = require('../models/Addon');
-    const { name, type, priceINR, priceUSD, zoneCount, jobCreditCount, unlockAllZones } = req.body;
-
-    if (!name || !type) {
-      return res.status(400).json({ error: 'Name and type are required' });
-    }
-
-    if (!['zone', 'jobs'].includes(type)) {
-      return res.status(400).json({ error: 'Type must be zone or jobs' });
-    }
-
-    const existingAddon = await Addon.findOne({ name: name.trim() });
-    if (existingAddon) {
-      return res.status(409).json({ error: 'Addon with this name already exists' });
-    }
-
-    const addonData = {
-      name: name.trim(),
-      type,
-      priceINR: priceINR || null,
-      priceUSD: priceUSD || null
-    };
-
-    if (type === 'zone') {
-      addonData.unlockAllZones = unlockAllZones || false;
-      if (!unlockAllZones) {
-        addonData.zoneCount = zoneCount;
-      }
-    } else if (type === 'jobs') {
-      addonData.jobCreditCount = jobCreditCount;
-    }
-
-    const addon = await Addon.create(addonData);
-
-    res.status(201).json({
-      id: addon._id,
-      name: addon.name,
-      type: addon.type,
-      priceINR: addon.priceINR,
-      priceUSD: addon.priceUSD,
-      zoneCount: addon.zoneCount,
-      jobCreditCount: addon.jobCreditCount,
-      unlockAllZones: addon.unlockAllZones
-    });
-  } catch (error) {
-    if (error.name === 'ValidationError') {
-      return res.status(400).json({ error: error.message });
-    }
-    console.error('Create addon error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.updateAddon = async (req, res) => {
-  try {
-    const Addon = require('../models/Addon');
-    const { addonId } = req.params;
-    const { name, priceINR, priceUSD, zoneCount, jobCreditCount, unlockAllZones } = req.body;
-
-    if (!mongoose.Types.ObjectId.isValid(addonId)) {
-      return res.status(400).json({ error: 'Invalid addon ID' });
-    }
-
-    const addon = await Addon.findById(addonId);
-    if (!addon) {
-      return res.status(404).json({ error: 'Addon not found' });
-    }
-
-    if (name !== undefined) {
-      const existingAddon = await Addon.findOne({
-        name: name.trim(),
-        _id: { $ne: addonId }
-      });
-      if (existingAddon) {
-        return res.status(409).json({ error: 'Addon with this name already exists' });
-      }
-      addon.name = name.trim();
-    }
-
-    if (priceINR !== undefined) addon.priceINR = priceINR;
-    if (priceUSD !== undefined) addon.priceUSD = priceUSD;
-
-    if (addon.type === 'zone') {
-      if (unlockAllZones !== undefined) addon.unlockAllZones = unlockAllZones;
-      if (zoneCount !== undefined && !addon.unlockAllZones) addon.zoneCount = zoneCount;
-    } else if (addon.type === 'jobs') {
-      if (jobCreditCount !== undefined) addon.jobCreditCount = jobCreditCount;
-    }
-
-    await addon.save();
-
-    res.json({
-      id: addon._id,
-      name: addon.name,
-      type: addon.type,
-      priceINR: addon.priceINR,
-      priceUSD: addon.priceUSD,
-      zoneCount: addon.zoneCount,
-      jobCreditCount: addon.jobCreditCount,
-      unlockAllZones: addon.unlockAllZones
-    });
-  } catch (error) {
-    if (error.name === 'ValidationError') {
-      return res.status(400).json({ error: error.message });
-    }
-    console.error('Update addon error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-exports.deleteAddon = async (req, res) => {
-  try {
-    const Addon = require('../models/Addon');
-    const SubscriptionAddon = require('../models/SubscriptionAddon');
-    const { addonId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(addonId)) {
-      return res.status(400).json({ error: 'Invalid addon ID' });
-    }
-
-    const purchaseCount = await SubscriptionAddon.countDocuments({ addonId });
-    if (purchaseCount > 0) {
-      return res.status(400).json({
-        error: 'Cannot delete addon that has been purchased',
-        purchaseCount
-      });
-    }
-
-    await Addon.findByIdAndDelete(addonId);
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Delete addon error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-// ─── Account Lifecycle ────────────────────────────────────────────────────────
-
-exports.setStudentActiveStatus = async (req, res) => {
-  try {
-    const { studentId } = req.params;
-    const { isActive } = req.body;
-    const student = await Student.findById(studentId);
-    if (!student) return res.status(404).json({ success: false, message: 'Student not found' });
-    await User.findByIdAndUpdate(student.userId, { isActive });
-    res.json({ success: true, isActive });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
 exports.setCompanyActiveStatus = async (req, res) => {
-  try {
-    const { companyId } = req.params;
-    const { isActive } = req.body;
-    const company = await Company.findById(companyId);
-    if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
-    await User.findByIdAndUpdate(company.userId, { isActive });
-    res.json({ success: true, isActive });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    try {
+        const { companyId } = req.params;
+        const { isActive } = req.body;
+        const { data: company } = await supabase.from('companies').select('user_id').eq('id', companyId).maybeSingle();
+        if (!company)
+            return res.status(404).json({ success: false, message: 'Company not found' });
+        await supabase.from('users').update({ is_active: isActive }).eq('id', company.user_id);
+        res.json({ success: true, isActive });
+    }
+    catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
 };
+// ─── Job Management ─────────────────────────────────────────────────────────
+const escapeLike = (value) => value.replace(/[\\%_]/g, (c) => `\\${c}`);
+exports.getJobs = async (req, res) => {
+    try {
+        const { status, search, location, jobType, page = 1, limit = 10 } = req.query;
+        if (status && !JOB_STATUSES.includes(status)) {
+            return res.status(400).json({ error: `Status must be one of: ${JOB_STATUSES.join(', ')}` });
+        }
+        if (jobType && !JOB_TYPES.includes(jobType)) {
+            return res.status(400).json({ error: `Job type must be one of: ${JOB_TYPES.join(', ')}` });
+        }
+        const pageNum = Math.max(1, parseInt(page) || 1);
+        const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 10));
+        const from = (pageNum - 1) * limitNum;
+        const to = from + limitNum - 1;
+        let query = supabase.from('job_postings').select('*, companies ( id, name )', { count: 'exact' });
+        if (status)
+            query = query.eq('status', status);
+        if (jobType)
+            query = query.eq('job_type', jobType);
+        if (location)
+            query = query.ilike('location', `%${escapeLike(location)}%`);
+        if (search) {
+            const escaped = escapeLike(search);
+            query = query.or(`title.ilike.%${escaped}%,description.ilike.%${escaped}%`);
+        }
+        const { data: jobs, count, error } = await query.order('created_at', { ascending: false }).range(from, to);
+        if (error)
+            throw error;
+        const result = (jobs || []).map((job) => ({
+            id: job.id,
+            companyId: job.companies?.id,
+            title: job.title,
+            description: job.description,
+            requirements: job.requirements,
+            location: job.location,
+            jobType: job.job_type,
+            salaryRange: job.salary_range,
+            deadline: job.deadline,
+            status: job.status,
+            rejectionReason: job.rejection_reason,
+            createdAt: job.created_at,
+            approvedAt: job.approved_at,
+            company: job.companies ? { id: job.companies.id, name: job.companies.name } : null
+        }));
+        res.json({ jobs: result, pagination: { page: pageNum, limit: limitNum, total: count ?? 0, totalPages: Math.ceil((count ?? 0) / limitNum) } });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.getJob = async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        if (!isValidUuid(jobId)) {
+            return res.status(400).json({ error: 'Invalid job ID format' });
+        }
+        const { data: job } = await supabase.from('job_postings').select('*, companies ( id, name, email )').eq('id', jobId).maybeSingle();
+        if (!job)
+            return res.status(404).json({ error: 'Job not found' });
+        res.json({
+            id: job.id,
+            companyId: job.companies?.id,
+            title: job.title,
+            description: job.description,
+            requirements: job.requirements,
+            location: job.location,
+            jobType: job.job_type,
+            salaryRange: job.salary_range,
+            deadline: job.deadline,
+            status: job.status,
+            rejectionReason: job.rejection_reason,
+            createdAt: job.created_at,
+            approvedAt: job.approved_at,
+            company: job.companies ? { id: job.companies.id, name: job.companies.name, email: job.companies.email } : null
+        });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.updateJob = async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        if (!isValidUuid(jobId)) {
+            return res.status(400).json({ error: 'Invalid job ID format' });
+        }
+        const parsed = updateJobStatusSchema.parse(req.body);
+        const { data: job } = await supabase.from('job_postings').select('*').eq('id', jobId).maybeSingle();
+        if (!job)
+            return res.status(404).json({ error: 'Job not found' });
+        const previousStatus = job.status;
+        const updateFields = { status: parsed.status };
+        if (parsed.status === 'approved') {
+            updateFields.approved_at = new Date().toISOString();
+            updateFields.rejection_reason = null;
+        }
+        else if (parsed.status === 'rejected') {
+            updateFields.rejection_reason = parsed.rejectionReason || null;
+            updateFields.approved_at = null;
+        }
+        else if (parsed.status === 'pending') {
+            updateFields.approved_at = null;
+        }
+        // For 'closed', keep existing approved_at and rejection_reason
+        const { data: updatedJob, error } = await supabase
+            .from('job_postings')
+            .update(updateFields)
+            .eq('id', jobId)
+            .select('*, companies ( id, name, user_id )')
+            .single();
+        if (error)
+            throw error;
+        if (parsed.status === 'closed') {
+            await supabase
+                .from('applications')
+                .update({ status: 'rejected', rejection_reason: 'Job posting has been closed' })
+                .eq('job_posting_id', jobId)
+                .in('status', ['pending', 'reviewed']);
+        }
+        res.json({
+            id: updatedJob.id,
+            companyId: updatedJob.companies?.id,
+            title: updatedJob.title,
+            description: updatedJob.description,
+            requirements: updatedJob.requirements,
+            location: updatedJob.location,
+            jobType: updatedJob.job_type,
+            salaryRange: updatedJob.salary_range,
+            deadline: updatedJob.deadline,
+            status: updatedJob.status,
+            rejectionReason: updatedJob.rejection_reason,
+            createdAt: updatedJob.created_at,
+            approvedAt: updatedJob.approved_at,
+            company: updatedJob.companies ? { id: updatedJob.companies.id, name: updatedJob.companies.name } : null
+        });
+        const statusChanged = previousStatus !== updatedJob.status;
+        if (statusChanged && parsed.status === 'approved') {
+            const companyUserId = updatedJob.companies?.user_id;
+            notificationService
+                .notifyJobApproved(companyUserId, { jobTitle: updatedJob.title || 'Job Posting' })
+                .catch((error) => console.error('Notification error (job approved):', error));
+        }
+    }
+    catch (error) {
+        if (error.name === 'ZodError') {
+            return res.status(400).json({ error: error.issues[0].message });
+        }
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+// ─── Application Management ────────────────────────────────────────────────
+exports.getApplications = async (req, res) => {
+    try {
+        const { status, search, jobType, location, page = 1, limit = 10 } = req.query;
+        if (status && !APPLICATION_STATUSES.includes(status)) {
+            return res.status(400).json({ error: `Status must be one of: ${APPLICATION_STATUSES.join(', ')}` });
+        }
+        if (jobType && !JOB_TYPES.includes(jobType)) {
+            return res.status(400).json({ error: `Job type must be one of: ${JOB_TYPES.join(', ')}` });
+        }
+        const pageNum = Math.max(1, parseInt(page) || 1);
+        const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 10));
+        let query = supabase.from('applications').select('*, students ( id, full_name, email, profile_link, is_hired ), job_postings ( id, title, location, job_type, companies ( id, name ) )');
+        if (status)
+            query = query.eq('status', status);
+        const { data: applications, error } = await query.order('created_at', { ascending: false });
+        if (error)
+            throw error;
+        let filtered = applications || [];
+        if (jobType) {
+            filtered = filtered.filter((a) => a.job_postings?.job_type === jobType);
+        }
+        if (location) {
+            const loc = String(location).toLowerCase();
+            filtered = filtered.filter((a) => (a.job_postings?.location || '').toLowerCase().includes(loc));
+        }
+        if (search) {
+            const term = String(search).toLowerCase();
+            filtered = filtered.filter((a) => (a.students?.full_name || '').toLowerCase().includes(term) ||
+                (a.students?.email || '').toLowerCase().includes(term) ||
+                (a.job_postings?.title || '').toLowerCase().includes(term));
+        }
+        const total = filtered.length;
+        const paged = filtered.slice((pageNum - 1) * limitNum, (pageNum - 1) * limitNum + limitNum);
+        const result = paged.map((app) => ({
+            id: app.id,
+            studentId: app.student_id,
+            jobPostingId: app.job_posting_id,
+            status: app.status,
+            createdAt: app.created_at,
+            reviewedAt: app.reviewed_at,
+            rejectionReason: app.rejection_reason,
+            student: app.students
+                ? {
+                    id: app.students.id,
+                    fullName: app.students.full_name,
+                    email: app.students.email,
+                    profileLink: app.students.profile_link,
+                    isHired: app.students.is_hired
+                }
+                : null,
+            jobPosting: app.job_postings
+                ? {
+                    id: app.job_postings.id,
+                    title: app.job_postings.title,
+                    location: app.job_postings.location,
+                    jobType: app.job_postings.job_type,
+                    company: app.job_postings.companies ? { id: app.job_postings.companies.id, name: app.job_postings.companies.name } : null
+                }
+                : null
+        }));
+        res.json({ applications: result, pagination: { page: pageNum, limit: limitNum, total, totalPages: Math.ceil(total / limitNum) } });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.updateApplication = async (req, res) => {
+    try {
+        const { appId } = req.params;
+        if (!isValidUuid(appId)) {
+            return res.status(400).json({ error: 'Invalid application ID format' });
+        }
+        const parsed = adminUpdateApplicationSchema.parse(req.body);
+        const { data: application } = await supabase.from('applications').select('*').eq('id', appId).maybeSingle();
+        if (!application)
+            return res.status(404).json({ error: 'Application not found' });
+        if (application.status === 'withdrawn') {
+            return res.status(400).json({ error: 'Cannot process withdrawn applications' });
+        }
+        if (application.status === 'hired') {
+            return res.status(400).json({ error: 'Cannot modify applications that have been hired' });
+        }
+        const updateFields = { status: parsed.status };
+        if (parsed.status === 'reviewed') {
+            updateFields.reviewed_at = new Date().toISOString();
+            updateFields.rejection_reason = null;
+            updateFields.rejection_source = null;
+        }
+        else if (parsed.status === 'rejected') {
+            // Don't set reviewed_at when admin rejects - keeps it hidden from companies
+            updateFields.rejection_reason = parsed.rejectionReason || null;
+            updateFields.rejection_source = 'admin';
+        }
+        const { data: updatedApp, error } = await supabase
+            .from('applications')
+            .update(updateFields)
+            .eq('id', appId)
+            .select('*, students ( id, full_name, email, profile_link, is_hired, user_id ), job_postings ( id, title, companies ( id, name, user_id ) )')
+            .single();
+        if (error)
+            throw error;
+        const student = updatedApp.students;
+        const job = updatedApp.job_postings;
+        const company = job?.companies;
+        res.json({
+            id: updatedApp.id,
+            studentId: student?.id,
+            jobPostingId: job?.id,
+            status: updatedApp.status,
+            createdAt: updatedApp.created_at,
+            reviewedAt: updatedApp.reviewed_at,
+            rejectionReason: updatedApp.rejection_reason,
+            student: student ? { id: student.id, fullName: student.full_name, email: student.email, profileLink: student.profile_link, isHired: student.is_hired } : null,
+            jobPosting: job ? { id: job.id, title: job.title, company: company ? { id: company.id, name: company.name } : null } : null
+        });
+        if (!student || !job || !company)
+            return;
+        if (parsed.status === 'reviewed') {
+            emailService
+                .sendApplicationStatusEmail(student.email, { status: 'approved', jobTitle: job.title, companyName: company.name, studentName: student.full_name }, { userId: student.user_id })
+                .catch((error) => console.error('Failed to send application approval email', error));
+            notificationService
+                .notifyApplicationApproved(student.user_id, { jobTitle: job.title, companyName: company.name })
+                .catch((err) => console.error('Notification error (app approved):', err));
+            if (company.user_id) {
+                notificationService
+                    .notifyApplicationReceived(company.user_id, { jobTitle: job.title, studentName: student.full_name })
+                    .catch((err) => console.error('Notification error (app received by company):', err));
+            }
+        }
+        else if (parsed.status === 'rejected') {
+            emailService
+                .sendApplicationStatusEmail(student.email, {
+                status: 'rejected',
+                jobTitle: job.title,
+                companyName: company.name,
+                studentName: student.full_name,
+                reason: updatedApp.rejection_reason
+            }, { userId: student.user_id })
+                .catch((error) => console.error('Failed to send application rejection email', error));
+            notificationService
+                .notifyApplicationRejected(student.user_id, { jobTitle: job.title, companyName: company.name, reason: updatedApp.rejection_reason })
+                .catch((err) => console.error('Notification error (app rejected):', err));
+        }
+    }
+    catch (error) {
+        if (error.name === 'ZodError') {
+            return res.status(400).json({ error: error.issues[0].message });
+        }
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+// ─── Student Management ────────────────────────────────────────────────────
+exports.getStudents = async (req, res) => {
+    try {
+        const { subscriptionTier, hasActiveApplications, isHired, hasResume, hasVideo, search, page = 1, limit = 20 } = req.query;
+        const pageNum = Math.max(1, parseInt(page) || 1);
+        const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 20));
+        let query = supabase.from('students').select('*, users ( is_active )');
+        if (subscriptionTier && ['free', 'paid'].includes(subscriptionTier)) {
+            query = query.eq('subscription_tier', subscriptionTier);
+        }
+        if (isHired !== undefined) {
+            query = query.eq('is_hired', isHired === 'true');
+        }
+        if (hasResume !== undefined) {
+            query = hasResume === 'true' ? query.not('resume_url', 'is', null) : query.is('resume_url', null);
+        }
+        if (hasVideo !== undefined) {
+            query = hasVideo === 'true' ? query.not('intro_video_url', 'is', null) : query.is('intro_video_url', null);
+        }
+        if (search) {
+            const escaped = escapeLike(search);
+            query = query.or(`full_name.ilike.%${escaped}%,email.ilike.%${escaped}%,student_id.ilike.%${escaped}%`);
+        }
+        const { data: students, error } = await query.order('created_at', { ascending: false });
+        if (error)
+            throw error;
+        const studentList = students || [];
+        const studentIds = studentList.map((s) => s.id);
+        const { data: applications } = studentIds.length
+            ? await supabase.from('applications').select('student_id, status').in('student_id', studentIds)
+            : { data: [] };
+        const appCountsByStudent = new Map();
+        for (const app of applications || []) {
+            const entry = appCountsByStudent.get(app.student_id) || { total: 0, active: 0 };
+            entry.total += 1;
+            if (['pending', 'reviewed'].includes(app.status))
+                entry.active += 1;
+            appCountsByStudent.set(app.student_id, entry);
+        }
+        let shaped = studentList.map((s) => {
+            const counts = appCountsByStudent.get(s.id) || { total: 0, active: 0 };
+            return {
+                id: s.id,
+                studentId: s.student_id || null,
+                fullName: s.full_name,
+                email: s.email,
+                subscriptionTier: s.subscription_tier,
+                isHired: s.is_hired,
+                isActive: s.users?.is_active !== false,
+                hasResume: Boolean(s.resume_url),
+                hasVideo: Boolean(s.intro_video_url),
+                totalApplications: counts.total,
+                activeApplications: counts.active,
+                createdAt: s.created_at
+            };
+        });
+        if (hasActiveApplications !== undefined) {
+            shaped = hasActiveApplications === 'true' ? shaped.filter((s) => s.activeApplications > 0) : shaped.filter((s) => s.activeApplications === 0);
+        }
+        const total = shaped.length;
+        const paged = shaped.slice((pageNum - 1) * limitNum, (pageNum - 1) * limitNum + limitNum);
+        res.json({ students: paged, pagination: { page: pageNum, limit: limitNum, total, totalPages: Math.ceil(total / limitNum) } });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.getStudentProfile = async (req, res) => {
+    try {
+        const { studentId } = req.params;
+        if (!isValidUuid(studentId)) {
+            return res.status(400).json({ error: 'Invalid student ID format' });
+        }
+        const { data: student } = await supabase.from('students').select('*, users ( is_active )').eq('id', studentId).maybeSingle();
+        if (!student)
+            return res.status(404).json({ error: 'Student not found' });
+        let currentSubscription = null;
+        if (student.current_subscription_id) {
+            const { data: sub } = await supabase
+                .from('active_subscriptions')
+                .select('*, available_services ( id, name, description, price, billing_cycle, features )')
+                .eq('id', student.current_subscription_id)
+                .maybeSingle();
+            currentSubscription = sub;
+        }
+        const [resumeUrl, introVideoUrl] = await Promise.all([
+            student.resume_url ? getPresignedUrl(student.resume_url) : null,
+            student.intro_video_url ? getPresignedUrl(student.intro_video_url) : null
+        ]);
+        const { data: payments } = await supabase
+            .from('payment_records')
+            .select('*, active_subscriptions ( id, available_services ( id, name, price ) ), available_services ( id, name, price )')
+            .eq('student_id', student.id)
+            .order('payment_date', { ascending: false });
+        const paymentList = payments || [];
+        const { data: payPerJobPurchases } = await supabase
+            .from('pay_per_job_purchases')
+            .select('*, job_postings ( id, title )')
+            .eq('student_id', student.id);
+        const payPerJobByOrderId = new Map((payPerJobPurchases || []).filter((p) => p.razorpay_order_id).map((p) => [p.razorpay_order_id, p]));
+        const paymentIds = paymentList.map((p) => p.id);
+        const { data: subscriptionAddons } = paymentIds.length
+            ? await supabase.from('subscription_addons').select('*, addons ( id, name, type )').in('payment_record_id', paymentIds)
+            : { data: [] };
+        const addonByPaymentId = new Map((subscriptionAddons || []).map((sa) => [sa.payment_record_id, sa]));
+        const { data: applications } = await supabase
+            .from('applications')
+            .select('*, job_postings ( id, title, location, job_type, salary_range, status, companies ( id, name ) )')
+            .eq('student_id', student.id)
+            .order('created_at', { ascending: false });
+        res.json({
+            id: student.id,
+            studentId: student.student_id || null,
+            fullName: student.full_name,
+            email: student.email,
+            isActive: student.users?.is_active !== false,
+            isDGShipping: student.is_dg_shipping || 'no',
+            profileLink: student.profile_link || null,
+            bio: student.bio || null,
+            location: student.location || null,
+            availableFrom: student.available_from || null,
+            skills: student.skills || [],
+            education: student.education || [],
+            experience: student.experience || [],
+            resumeUrl,
+            introVideoUrl,
+            isHired: student.is_hired,
+            createdAt: student.created_at,
+            subscription: {
+                tier: student.subscription_tier,
+                current: currentSubscription
+                    ? {
+                        id: currentSubscription.id,
+                        status: currentSubscription.status,
+                        startDate: currentSubscription.start_date,
+                        endDate: currentSubscription.end_date,
+                        autoRenew: currentSubscription.auto_renew,
+                        plan: currentSubscription.available_services
+                            ? {
+                                id: currentSubscription.available_services.id,
+                                name: currentSubscription.available_services.name,
+                                description: currentSubscription.available_services.description,
+                                price: currentSubscription.available_services.price,
+                                billingCycle: currentSubscription.available_services.billing_cycle,
+                                features: currentSubscription.available_services.features
+                            }
+                            : null
+                    }
+                    : null
+            },
+            payments: paymentList.map((p) => {
+                let paymentType = 'unknown';
+                let typeLabel = 'Unknown';
+                let details = null;
+                const gatewayType = p.gateway_response?.type;
+                const orderId = p.razorpay_order_id || p.gateway_response?.orderId;
+                if (gatewayType === 'pay_per_job') {
+                    paymentType = 'pay-per-job';
+                    typeLabel = 'Pay Per Job';
+                    const purchase = payPerJobByOrderId.get(orderId);
+                    if (purchase?.job_postings) {
+                        details = { jobId: purchase.job_postings.id, jobTitle: purchase.job_postings.title };
+                    }
+                }
+                else if (gatewayType === 'zone_addon') {
+                    paymentType = 'zone-addon';
+                    typeLabel = 'Zone Addon';
+                    const addon = addonByPaymentId.get(p.id);
+                    if (addon?.addons) {
+                        details = { addonId: addon.addons.id, addonName: addon.addons.name };
+                    }
+                }
+                else if (p.active_subscriptions?.available_services) {
+                    paymentType = 'plan';
+                    typeLabel = 'Plan Purchase';
+                    details = {
+                        planId: p.active_subscriptions.available_services.id,
+                        planName: p.active_subscriptions.available_services.name,
+                        planPrice: p.active_subscriptions.available_services.price
+                    };
+                }
+                else if (p.available_services) {
+                    paymentType = 'plan';
+                    typeLabel = 'Plan Purchase';
+                    details = { planId: p.available_services.id, planName: p.available_services.name, planPrice: p.available_services.price };
+                }
+                return {
+                    id: p.id,
+                    type: paymentType,
+                    typeLabel,
+                    amount: p.amount,
+                    currency: p.currency,
+                    status: p.status,
+                    paymentDate: p.payment_date,
+                    paymentMethod: p.payment_method,
+                    razorpayOrderId: orderId || null,
+                    razorpayPaymentId: p.razorpay_payment_id || null,
+                    transactionId: p.razorpay_payment_id || p.transaction_id,
+                    details
+                };
+            }),
+            applications: (applications || []).map((app) => ({
+                id: app.id,
+                status: app.status,
+                createdAt: app.created_at,
+                reviewedAt: app.reviewed_at,
+                rejectionReason: app.rejection_reason,
+                job: app.job_postings
+                    ? {
+                        id: app.job_postings.id,
+                        title: app.job_postings.title,
+                        location: app.job_postings.location,
+                        jobType: app.job_postings.job_type,
+                        salaryRange: app.job_postings.salary_range,
+                        status: app.job_postings.status,
+                        company: app.job_postings.companies ? { id: app.job_postings.companies.id, name: app.job_postings.companies.name } : null
+                    }
+                    : null
+            }))
+        });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.assignStudentSubscription = async (req, res) => {
+    try {
+        const { studentId } = req.params;
+        const { serviceId } = req.body;
+        if (!isValidUuid(studentId)) {
+            return res.status(400).json({ error: 'Invalid student ID format' });
+        }
+        if (!serviceId || !isValidUuid(serviceId)) {
+            return res.status(400).json({ error: 'Valid service ID is required' });
+        }
+        const { data: student } = await supabase.from('students').select('*').eq('id', studentId).maybeSingle();
+        if (!student)
+            return res.status(404).json({ error: 'Student not found' });
+        const { data: service } = await supabase.from('available_services').select('*').eq('id', serviceId).maybeSingle();
+        if (!service)
+            return res.status(404).json({ error: 'Subscription plan not found' });
+        // Mark current subscription as exhausted if exists and is not free
+        if (student.current_subscription_id) {
+            const { data: currentSub } = await supabase
+                .from('active_subscriptions')
+                .select('id, service_id')
+                .eq('id', student.current_subscription_id)
+                .maybeSingle();
+            if (currentSub) {
+                const { data: currentService } = await supabase.from('available_services').select('tier').eq('id', currentSub.service_id).maybeSingle();
+                if (currentService?.tier !== 'free') {
+                    await supabase.from('active_subscriptions').update({ status: 'exhausted', auto_renew: false }).eq('id', currentSub.id);
+                }
+            }
+        }
+        const { data: subscription, error } = await supabase
+            .from('active_subscriptions')
+            .insert({
+            student_id: student.id,
+            service_id: service.id,
+            start_date: new Date().toISOString(),
+            end_date: null,
+            status: 'active',
+            auto_renew: false,
+            applications_used: 0
+        })
+            .select()
+            .single();
+        if (error)
+            throw error;
+        await supabase.from('students').update({ current_subscription_id: subscription.id, subscription_tier: service.tier }).eq('id', student.id);
+        res.json({
+            success: true,
+            message: `Student assigned to ${service.name} plan`,
+            subscription: {
+                id: subscription.id,
+                status: subscription.status,
+                startDate: subscription.start_date,
+                endDate: subscription.end_date,
+                autoRenew: subscription.auto_renew,
+                plan: {
+                    id: service.id,
+                    name: service.name,
+                    description: service.description,
+                    price: service.price,
+                    billingCycle: service.billing_cycle,
+                    tier: service.tier
+                }
+            }
+        });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.setStudentActiveStatus = async (req, res) => {
+    try {
+        const { studentId } = req.params;
+        const { isActive } = req.body;
+        const { data: student } = await supabase.from('students').select('user_id').eq('id', studentId).maybeSingle();
+        if (!student)
+            return res.status(404).json({ success: false, message: 'Student not found' });
+        await supabase.from('users').update({ is_active: isActive }).eq('id', student.user_id);
+        res.json({ success: true, isActive });
+    }
+    catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+// ─── Subscription Plan Management ──────────────────────────────────────────
+exports.getSubscriptionPlans = async (req, res) => {
+    try {
+        const { includeInactive = 'true' } = req.query;
+        let query = supabase.from('available_services').select('*');
+        if (includeInactive !== 'true')
+            query = query.eq('is_active', true);
+        const { data: plans, error } = await query.order('display_order', { ascending: true }).order('created_at', { ascending: false });
+        if (error)
+            throw error;
+        res.json({ plans: (plans || []).map(buildSubscriptionPlanResponse) });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.getSubscriptionPlan = async (req, res) => {
+    try {
+        const { planId } = req.params;
+        if (!isValidUuid(planId)) {
+            return res.status(400).json({ error: 'Invalid plan ID format' });
+        }
+        const { data: plan } = await supabase.from('available_services').select('*').eq('id', planId).maybeSingle();
+        if (!plan)
+            return res.status(404).json({ error: 'Subscription plan not found' });
+        res.json(buildSubscriptionPlanResponse(plan));
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.createSubscriptionPlan = async (req, res) => {
+    try {
+        const { name, description, maxApplications, price, priceINR, priceUSD, currency, discount, features, badge, displayOrder, resumeDownloads, videoViews, prioritySupport, profileBoost, applicationHighlight, allZonesIncluded, isActive } = req.body;
+        if (!name || name.trim().length < 2) {
+            return res.status(400).json({ error: 'Name must be at least 2 characters' });
+        }
+        if (!description || description.trim().length < 10) {
+            return res.status(400).json({ error: 'Description must be at least 10 characters' });
+        }
+        const inrPrice = priceINR ?? price;
+        if (inrPrice === undefined || inrPrice < 0) {
+            return res.status(400).json({ error: 'Price (INR) must be a non-negative number' });
+        }
+        if (priceUSD !== undefined && priceUSD !== null && priceUSD < 0) {
+            return res.status(400).json({ error: 'Price (USD) must be a non-negative number' });
+        }
+        if (currency && !CURRENCIES.includes(currency)) {
+            return res.status(400).json({ error: `Currency must be one of: ${CURRENCIES.join(', ')}` });
+        }
+        const normalizedMaxApplications = maxApplications === '' || maxApplications === undefined ? null : maxApplications;
+        if (normalizedMaxApplications !== null && normalizedMaxApplications < 1) {
+            return res.status(400).json({ error: 'maxApplications must be at least 1, or omit it for unlimited' });
+        }
+        const { data: plan, error } = await supabase
+            .from('available_services')
+            .insert({
+            name: name.trim(),
+            description: description.trim(),
+            max_applications: normalizedMaxApplications,
+            price: inrPrice,
+            price_inr: inrPrice,
+            price_usd: priceUSD ?? 0,
+            currency: currency || 'INR',
+            billing_cycle: 'one-time',
+            discount: discount || 0,
+            features: features || [],
+            badge: badge?.trim() || null,
+            display_order: displayOrder || 0,
+            resume_downloads: resumeDownloads || null,
+            video_views: videoViews || null,
+            priority_support: prioritySupport || false,
+            profile_boost: profileBoost || false,
+            application_highlight: applicationHighlight || false,
+            all_zones_included: allZonesIncluded || false,
+            is_active: isActive !== false
+        })
+            .select()
+            .single();
+        if (error)
+            throw error;
+        res.status(201).json(buildSubscriptionPlanResponse(plan));
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.updateSubscriptionPlan = async (req, res) => {
+    try {
+        const { planId } = req.params;
+        if (!isValidUuid(planId)) {
+            return res.status(400).json({ error: 'Invalid plan ID format' });
+        }
+        const { data: plan } = await supabase.from('available_services').select('*').eq('id', planId).maybeSingle();
+        if (!plan)
+            return res.status(404).json({ error: 'Subscription plan not found' });
+        const { name, description, maxApplications, price, priceINR, priceUSD, currency, discount, features, badge, displayOrder, resumeDownloads, videoViews, prioritySupport, profileBoost, applicationHighlight, allZonesIncluded, isActive } = req.body;
+        const updates = {};
+        if (name !== undefined) {
+            if (name.trim().length < 2)
+                return res.status(400).json({ error: 'Name must be at least 2 characters' });
+            updates.name = name.trim();
+        }
+        if (description !== undefined) {
+            if (description.trim().length < 10)
+                return res.status(400).json({ error: 'Description must be at least 10 characters' });
+            updates.description = description.trim();
+        }
+        if (price !== undefined || priceINR !== undefined) {
+            const newPrice = priceINR ?? price;
+            if (newPrice < 0)
+                return res.status(400).json({ error: 'Price (INR) must be a non-negative number' });
+            updates.price = newPrice;
+            updates.price_inr = newPrice;
+        }
+        if (priceUSD !== undefined) {
+            if (priceUSD !== null && priceUSD < 0)
+                return res.status(400).json({ error: 'Price (USD) must be a non-negative number' });
+            updates.price_usd = priceUSD;
+        }
+        if (currency !== undefined) {
+            if (!CURRENCIES.includes(currency))
+                return res.status(400).json({ error: `Currency must be one of: ${CURRENCIES.join(', ')}` });
+            updates.currency = currency;
+        }
+        if (maxApplications !== undefined) {
+            if (plan.tier === 'free') {
+                updates.max_applications = 2;
+            }
+            else {
+                const normalizedMax = maxApplications === '' ? null : maxApplications;
+                if (normalizedMax !== null && normalizedMax < 1) {
+                    return res.status(400).json({ error: 'maxApplications must be at least 1, or null for unlimited' });
+                }
+                updates.max_applications = normalizedMax;
+            }
+        }
+        if (discount !== undefined)
+            updates.discount = discount;
+        if (features !== undefined)
+            updates.features = features;
+        if (badge !== undefined)
+            updates.badge = badge?.trim() || null;
+        if (displayOrder !== undefined)
+            updates.display_order = displayOrder;
+        if (resumeDownloads !== undefined)
+            updates.resume_downloads = resumeDownloads || null;
+        if (videoViews !== undefined)
+            updates.video_views = videoViews || null;
+        if (prioritySupport !== undefined)
+            updates.priority_support = prioritySupport;
+        if (profileBoost !== undefined)
+            updates.profile_boost = profileBoost;
+        if (applicationHighlight !== undefined)
+            updates.application_highlight = applicationHighlight;
+        if (allZonesIncluded !== undefined)
+            updates.all_zones_included = allZonesIncluded;
+        if (isActive !== undefined)
+            updates.is_active = isActive;
+        const { data: updated, error } = await supabase.from('available_services').update(updates).eq('id', planId).select().single();
+        if (error)
+            throw error;
+        res.json(buildSubscriptionPlanResponse(updated));
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.deleteSubscriptionPlan = async (req, res) => {
+    try {
+        const { planId } = req.params;
+        if (!isValidUuid(planId)) {
+            return res.status(400).json({ error: 'Invalid plan ID format' });
+        }
+        const { data: plan } = await supabase.from('available_services').select('id').eq('id', planId).maybeSingle();
+        if (!plan)
+            return res.status(404).json({ error: 'Subscription plan not found' });
+        // Soft delete by setting is_active to false
+        await supabase.from('available_services').update({ is_active: false }).eq('id', planId);
+        res.json({ success: true, message: 'Subscription plan deactivated' });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+// ─── Free Tier Configuration ────────────────────────────────────────────────
+exports.getFreeTierConfig = async (_req, res) => {
+    try {
+        const [features, resumeDownloads, videoViews] = await Promise.all([
+            getConfigValue(CONFIG_KEYS.FREE_TIER_FEATURES, []),
+            getConfigValue(CONFIG_KEYS.FREE_TIER_RESUME_DOWNLOADS, null),
+            getConfigValue(CONFIG_KEYS.FREE_TIER_VIDEO_VIEWS, null)
+        ]);
+        res.json({ maxApplications: 2, features, resumeDownloadsPerMonth: resumeDownloads, videoViewsPerMonth: videoViews });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.updateFreeTierConfig = async (req, res) => {
+    try {
+        const { maxApplications, features, resumeDownloadsPerMonth, videoViewsPerMonth } = req.body;
+        const updates = [];
+        if (maxApplications !== undefined) {
+            if (maxApplications !== 2) {
+                return res.status(400).json({ error: 'Free tier max applications is fixed at 2' });
+            }
+            updates.push(setConfigValue(CONFIG_KEYS.FREE_TIER_MAX_APPLICATIONS, 2, 'Maximum applications allowed for free tier', req.user.userId));
+        }
+        if (features !== undefined) {
+            if (!Array.isArray(features)) {
+                return res.status(400).json({ error: 'Features must be an array' });
+            }
+            updates.push(setConfigValue(CONFIG_KEYS.FREE_TIER_FEATURES, features, 'Features available for free tier', req.user.userId));
+        }
+        if (resumeDownloadsPerMonth !== undefined) {
+            updates.push(setConfigValue(CONFIG_KEYS.FREE_TIER_RESUME_DOWNLOADS, resumeDownloadsPerMonth, 'Resume downloads per month for free tier', req.user.userId));
+        }
+        if (videoViewsPerMonth !== undefined) {
+            updates.push(setConfigValue(CONFIG_KEYS.FREE_TIER_VIDEO_VIEWS, videoViewsPerMonth, 'Video views per month for free tier', req.user.userId));
+        }
+        if (updates.length === 0) {
+            return res.status(400).json({ error: 'No fields to update' });
+        }
+        await Promise.all(updates);
+        const [updatedFeatures, updatedResumeDownloads, updatedVideoViews] = await Promise.all([
+            getConfigValue(CONFIG_KEYS.FREE_TIER_FEATURES, []),
+            getConfigValue(CONFIG_KEYS.FREE_TIER_RESUME_DOWNLOADS, null),
+            getConfigValue(CONFIG_KEYS.FREE_TIER_VIDEO_VIEWS, null)
+        ]);
+        res.json({
+            maxApplications: 2,
+            features: updatedFeatures,
+            resumeDownloadsPerMonth: updatedResumeDownloads,
+            videoViewsPerMonth: updatedVideoViews
+        });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+// ─── Zone Management ────────────────────────────────────────────────────────
+exports.getZones = async (_req, res) => {
+    try {
+        const { data: zones } = await supabase.from('zones').select('*').order('name', { ascending: true });
+        const zonesWithCountries = await Promise.all((zones || []).map(async (zone) => {
+            const { data: countries } = await supabase
+                .from('zone_countries')
+                .select('id, country_name')
+                .eq('zone_id', zone.id)
+                .order('country_name', { ascending: true });
+            return {
+                id: zone.id,
+                name: zone.name,
+                description: zone.description,
+                countries: (countries || []).map((c) => ({ id: c.id, name: c.country_name })),
+                countryCount: (countries || []).length
+            };
+        }));
+        res.json({ zones: zonesWithCountries });
+    }
+    catch (error) {
+        console.error('Get zones error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.createZone = async (req, res) => {
+    try {
+        const { name, description } = req.body;
+        if (!name || !description) {
+            return res.status(400).json({ error: 'Name and description are required' });
+        }
+        const { data: existingZone } = await supabase.from('zones').select('id').eq('name', name.trim()).maybeSingle();
+        if (existingZone) {
+            return res.status(409).json({ error: 'Zone with this name already exists' });
+        }
+        const { data: zone, error } = await supabase.from('zones').insert({ name: name.trim(), description: description.trim() }).select().single();
+        if (error)
+            throw error;
+        res.status(201).json({ id: zone.id, name: zone.name, description: zone.description, countries: [], countryCount: 0 });
+    }
+    catch (error) {
+        console.error('Create zone error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.updateZone = async (req, res) => {
+    try {
+        const { zoneId } = req.params;
+        const { name, description } = req.body;
+        if (!isValidUuid(zoneId)) {
+            return res.status(400).json({ error: 'Invalid zone ID' });
+        }
+        const { data: zone } = await supabase.from('zones').select('*').eq('id', zoneId).maybeSingle();
+        if (!zone)
+            return res.status(404).json({ error: 'Zone not found' });
+        const updates = {};
+        if (name !== undefined) {
+            const { data: existingZone } = await supabase.from('zones').select('id').eq('name', name.trim()).neq('id', zoneId).maybeSingle();
+            if (existingZone) {
+                return res.status(409).json({ error: 'Zone with this name already exists' });
+            }
+            updates.name = name.trim();
+        }
+        if (description !== undefined) {
+            updates.description = description.trim();
+        }
+        const { data: updated, error } = await supabase.from('zones').update(updates).eq('id', zoneId).select().single();
+        if (error)
+            throw error;
+        res.json({ id: updated.id, name: updated.name, description: updated.description });
+    }
+    catch (error) {
+        console.error('Update zone error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.deleteZone = async (req, res) => {
+    try {
+        const { zoneId } = req.params;
+        if (!isValidUuid(zoneId)) {
+            return res.status(400).json({ error: 'Invalid zone ID' });
+        }
+        const { count: planCount } = await supabase.from('plan_zones').select('*', { count: 'exact', head: true }).eq('zone_id', zoneId);
+        if ((planCount ?? 0) > 0) {
+            return res.status(400).json({ error: 'Cannot delete zone that is assigned to plans', planCount });
+        }
+        const { data: countries } = await supabase.from('zone_countries').select('id').eq('zone_id', zoneId);
+        const countryIds = (countries || []).map((c) => c.id);
+        let jobCount = 0;
+        if (countryIds.length) {
+            const { count } = await supabase.from('job_postings').select('*', { count: 'exact', head: true }).in('country_id', countryIds);
+            jobCount = count ?? 0;
+        }
+        if (jobCount > 0) {
+            return res.status(400).json({ error: 'Cannot delete zone with countries that have jobs assigned', jobCount });
+        }
+        await supabase.from('zone_countries').delete().eq('zone_id', zoneId);
+        await supabase.from('zones').delete().eq('id', zoneId);
+        res.json({ success: true });
+    }
+    catch (error) {
+        console.error('Delete zone error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.addCountryToZone = async (req, res) => {
+    try {
+        const { zoneId } = req.params;
+        const { countryName } = req.body;
+        if (!isValidUuid(zoneId)) {
+            return res.status(400).json({ error: 'Invalid zone ID' });
+        }
+        if (!countryName || typeof countryName !== 'string') {
+            return res.status(400).json({ error: 'Country name is required' });
+        }
+        const { data: zone } = await supabase.from('zones').select('id').eq('id', zoneId).maybeSingle();
+        if (!zone)
+            return res.status(404).json({ error: 'Zone not found' });
+        const { data: existingCountry } = await supabase.from('zone_countries').select('zone_id').eq('country_name', countryName.trim()).maybeSingle();
+        if (existingCountry) {
+            return res.status(409).json({ error: 'Country already exists', existingZoneId: existingCountry.zone_id });
+        }
+        const { data: country, error } = await supabase
+            .from('zone_countries')
+            .insert({ zone_id: zoneId, country_name: countryName.trim() })
+            .select()
+            .single();
+        if (error)
+            throw error;
+        res.status(201).json({ id: country.id, name: country.country_name, zoneId: country.zone_id });
+    }
+    catch (error) {
+        console.error('Add country to zone error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.removeCountryFromZone = async (req, res) => {
+    try {
+        const { zoneId, countryId } = req.params;
+        if (!isValidUuid(zoneId) || !isValidUuid(countryId)) {
+            return res.status(400).json({ error: 'Invalid zone or country ID' });
+        }
+        const { data: country } = await supabase.from('zone_countries').select('id').eq('id', countryId).eq('zone_id', zoneId).maybeSingle();
+        if (!country)
+            return res.status(404).json({ error: 'Country not found in this zone' });
+        const { count: jobCount } = await supabase.from('job_postings').select('*', { count: 'exact', head: true }).eq('country_id', countryId);
+        if ((jobCount ?? 0) > 0) {
+            return res.status(400).json({ error: 'Cannot remove country that has jobs assigned', jobCount });
+        }
+        await supabase.from('zone_countries').delete().eq('id', countryId);
+        res.json({ success: true });
+    }
+    catch (error) {
+        console.error('Remove country from zone error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.getPlanZones = async (req, res) => {
+    try {
+        const { planId } = req.params;
+        if (!isValidUuid(planId)) {
+            return res.status(400).json({ error: 'Invalid plan ID' });
+        }
+        const { data: plan } = await supabase.from('available_services').select('id, name, all_zones_included').eq('id', planId).maybeSingle();
+        if (!plan)
+            return res.status(404).json({ error: 'Plan not found' });
+        const { data: planZones } = await supabase.from('plan_zones').select('zones ( id, name, description )').eq('plan_id', planId);
+        const zones = (planZones || []).filter((pz) => pz.zones).map((pz) => ({ id: pz.zones.id, name: pz.zones.name, description: pz.zones.description }));
+        res.json({ planId, planName: plan.name, allZonesIncluded: plan.all_zones_included, zones });
+    }
+    catch (error) {
+        console.error('Get plan zones error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.setPlanZones = async (req, res) => {
+    try {
+        const { planId } = req.params;
+        const { zoneIds, allZonesIncluded } = req.body;
+        if (!isValidUuid(planId)) {
+            return res.status(400).json({ error: 'Invalid plan ID' });
+        }
+        const { data: plan } = await supabase.from('available_services').select('*').eq('id', planId).maybeSingle();
+        if (!plan)
+            return res.status(404).json({ error: 'Plan not found' });
+        let allZonesFlag = plan.all_zones_included;
+        if (typeof allZonesIncluded === 'boolean') {
+            await supabase.from('available_services').update({ all_zones_included: allZonesIncluded }).eq('id', planId);
+            allZonesFlag = allZonesIncluded;
+        }
+        if (allZonesFlag) {
+            await supabase.from('plan_zones').delete().eq('plan_id', planId);
+            return res.json({ planId, planName: plan.name, allZonesIncluded: true, zones: [] });
+        }
+        if (!Array.isArray(zoneIds)) {
+            return res.status(400).json({ error: 'zoneIds must be an array' });
+        }
+        const validZoneIds = zoneIds.filter((id) => isValidUuid(id));
+        const { data: zones } = validZoneIds.length
+            ? await supabase.from('zones').select('*').in('id', validZoneIds)
+            : { data: [] };
+        if ((zones || []).length !== validZoneIds.length) {
+            return res.status(400).json({ error: 'Some zone IDs are invalid' });
+        }
+        await supabase.from('plan_zones').delete().eq('plan_id', planId);
+        if (validZoneIds.length > 0) {
+            const rows = validZoneIds.map((zoneId) => ({ plan_id: planId, zone_id: zoneId }));
+            await supabase.from('plan_zones').insert(rows);
+        }
+        res.json({
+            planId,
+            planName: plan.name,
+            allZonesIncluded: allZonesFlag,
+            zones: (zones || []).map((z) => ({ id: z.id, name: z.name, description: z.description }))
+        });
+    }
+    catch (error) {
+        console.error('Set plan zones error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+// ─── Addon Management ───────────────────────────────────────────────────────
+exports.getAddons = async (_req, res) => {
+    try {
+        const { data: addons, error } = await supabase.from('addons').select('*').order('type', { ascending: true }).order('name', { ascending: true });
+        if (error)
+            throw error;
+        const formattedAddons = (addons || []).map((a) => ({
+            id: a.id,
+            name: a.name,
+            type: a.type,
+            priceINR: a.price_inr,
+            priceUSD: a.price_usd,
+            zoneCount: a.zone_count,
+            jobCreditCount: a.job_credit_count,
+            unlockAllZones: a.unlock_all_zones,
+            createdAt: a.created_at
+        }));
+        res.json({ addons: formattedAddons });
+    }
+    catch (error) {
+        console.error('Get addons error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.createAddon = async (req, res) => {
+    try {
+        const { name, type, priceINR, priceUSD, zoneCount, jobCreditCount, unlockAllZones } = req.body;
+        if (!name || !type) {
+            return res.status(400).json({ error: 'Name and type are required' });
+        }
+        if (!['zone', 'jobs'].includes(type)) {
+            return res.status(400).json({ error: 'Type must be zone or jobs' });
+        }
+        const { data: existingAddon } = await supabase.from('addons').select('id').eq('name', name.trim()).maybeSingle();
+        if (existingAddon) {
+            return res.status(409).json({ error: 'Addon with this name already exists' });
+        }
+        const addonData = {
+            name: name.trim(),
+            type,
+            price_inr: priceINR || null,
+            price_usd: priceUSD || null
+        };
+        if (type === 'zone') {
+            addonData.unlock_all_zones = unlockAllZones || false;
+            if (!unlockAllZones) {
+                addonData.zone_count = zoneCount;
+            }
+        }
+        else if (type === 'jobs') {
+            addonData.job_credit_count = jobCreditCount;
+        }
+        const { data: addon, error } = await supabase.from('addons').insert(addonData).select().single();
+        if (error) {
+            if (error.code === '23514') {
+                // Postgres CHECK constraint violation
+                return res.status(400).json({ error: error.message });
+            }
+            throw error;
+        }
+        res.status(201).json({
+            id: addon.id,
+            name: addon.name,
+            type: addon.type,
+            priceINR: addon.price_inr,
+            priceUSD: addon.price_usd,
+            zoneCount: addon.zone_count,
+            jobCreditCount: addon.job_credit_count,
+            unlockAllZones: addon.unlock_all_zones
+        });
+    }
+    catch (error) {
+        console.error('Create addon error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.updateAddon = async (req, res) => {
+    try {
+        const { addonId } = req.params;
+        const { name, priceINR, priceUSD, zoneCount, jobCreditCount, unlockAllZones } = req.body;
+        if (!isValidUuid(addonId)) {
+            return res.status(400).json({ error: 'Invalid addon ID' });
+        }
+        const { data: addon } = await supabase.from('addons').select('*').eq('id', addonId).maybeSingle();
+        if (!addon)
+            return res.status(404).json({ error: 'Addon not found' });
+        const updates = {};
+        if (name !== undefined) {
+            const { data: existingAddon } = await supabase.from('addons').select('id').eq('name', name.trim()).neq('id', addonId).maybeSingle();
+            if (existingAddon) {
+                return res.status(409).json({ error: 'Addon with this name already exists' });
+            }
+            updates.name = name.trim();
+        }
+        if (priceINR !== undefined)
+            updates.price_inr = priceINR;
+        if (priceUSD !== undefined)
+            updates.price_usd = priceUSD;
+        if (addon.type === 'zone') {
+            if (unlockAllZones !== undefined)
+                updates.unlock_all_zones = unlockAllZones;
+            const effectiveUnlockAll = unlockAllZones !== undefined ? unlockAllZones : addon.unlock_all_zones;
+            if (zoneCount !== undefined && !effectiveUnlockAll)
+                updates.zone_count = zoneCount;
+        }
+        else if (addon.type === 'jobs') {
+            if (jobCreditCount !== undefined)
+                updates.job_credit_count = jobCreditCount;
+        }
+        const { data: updated, error } = await supabase.from('addons').update(updates).eq('id', addonId).select().single();
+        if (error) {
+            if (error.code === '23514') {
+                return res.status(400).json({ error: error.message });
+            }
+            throw error;
+        }
+        res.json({
+            id: updated.id,
+            name: updated.name,
+            type: updated.type,
+            priceINR: updated.price_inr,
+            priceUSD: updated.price_usd,
+            zoneCount: updated.zone_count,
+            jobCreditCount: updated.job_credit_count,
+            unlockAllZones: updated.unlock_all_zones
+        });
+    }
+    catch (error) {
+        console.error('Update addon error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+exports.deleteAddon = async (req, res) => {
+    try {
+        const { addonId } = req.params;
+        if (!isValidUuid(addonId)) {
+            return res.status(400).json({ error: 'Invalid addon ID' });
+        }
+        const { count: purchaseCount } = await supabase.from('subscription_addons').select('*', { count: 'exact', head: true }).eq('addon_id', addonId);
+        if ((purchaseCount ?? 0) > 0) {
+            return res.status(400).json({ error: 'Cannot delete addon that has been purchased', purchaseCount });
+        }
+        await supabase.from('addons').delete().eq('id', addonId);
+        res.json({ success: true });
+    }
+    catch (error) {
+        console.error('Delete addon error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+//# sourceMappingURL=adminController.js.map

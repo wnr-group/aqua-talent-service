@@ -1,113 +1,109 @@
-const Notification = require('../models/Notification');
-
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const client_1 = require("../lib/supabase/client");
+const supabase = (0, client_1.getSupabaseClient)();
 const MAX_PAGE_SIZE = 50;
 const DEFAULT_PAGE_SIZE = 20;
-
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isValidUuid = (value) => typeof value === 'string' && UUID_RE.test(value);
 /**
  * GET /api/notifications
  * Returns paginated notifications for the authenticated user.
  * Query params: page (default 1), limit (default 20), unread (true/false)
  */
 exports.getNotifications = async (req, res) => {
-  try {
-    const { page = 1, limit = DEFAULT_PAGE_SIZE, unread } = req.query;
-
-    const pageNum = Math.max(1, parseInt(page) || 1);
-    const limitNum = Math.min(MAX_PAGE_SIZE, Math.max(1, parseInt(limit) || DEFAULT_PAGE_SIZE));
-    const skip = (pageNum - 1) * limitNum;
-
-    const filter = { recipientId: req.user.userId };
-
-    if (unread === 'true') {
-      filter.isRead = false;
-    } else if (unread === 'false') {
-      filter.isRead = true;
+    try {
+        const { page = 1, limit = DEFAULT_PAGE_SIZE, unread } = req.query;
+        const pageNum = Math.max(1, parseInt(page) || 1);
+        const limitNum = Math.min(MAX_PAGE_SIZE, Math.max(1, parseInt(limit) || DEFAULT_PAGE_SIZE));
+        const from = (pageNum - 1) * limitNum;
+        const to = from + limitNum - 1;
+        let query = supabase.from('notifications').select('*', { count: 'exact' }).eq('recipient_id', req.user.userId);
+        if (unread === 'true') {
+            query = query.eq('is_read', false);
+        }
+        else if (unread === 'false') {
+            query = query.eq('is_read', true);
+        }
+        const { data: notifications, count, error } = await query.order('created_at', { ascending: false }).range(from, to);
+        if (error)
+            throw error;
+        return res.json({
+            notifications: notifications || [],
+            pagination: { page: pageNum, limit: limitNum, total: count ?? 0, totalPages: Math.ceil((count ?? 0) / limitNum) }
+        });
     }
-
-    const [notifications, total] = await Promise.all([
-      Notification.find(filter)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limitNum)
-        .lean(),
-      Notification.countDocuments(filter)
-    ]);
-
-    return res.json({
-      notifications,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        totalPages: Math.ceil(total / limitNum)
-      }
-    });
-  } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Server error' });
-  }
+    catch (error) {
+        console.error(error);
+        return res.status(500).json({ error: 'Server error' });
+    }
 };
-
 /**
  * GET /api/notifications/unread-count
  * Returns the number of unread notifications for the authenticated user.
  */
 exports.getUnreadCount = async (req, res) => {
-  try {
-    const count = await Notification.countDocuments({
-      recipientId: req.user.userId,
-      isRead: false
-    });
-
-    return res.json({ count });
-  } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Server error' });
-  }
+    try {
+        const { count } = await supabase
+            .from('notifications')
+            .select('*', { count: 'exact', head: true })
+            .eq('recipient_id', req.user.userId)
+            .eq('is_read', false);
+        return res.json({ count: count ?? 0 });
+    }
+    catch (error) {
+        console.error(error);
+        return res.status(500).json({ error: 'Server error' });
+    }
 };
-
 /**
  * PATCH /api/notifications/:id/read
  * Marks a single notification as read.
  */
 exports.markAsRead = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const notification = await Notification.findOneAndUpdate(
-      { _id: id, recipientId: req.user.userId },
-      { $set: { isRead: true } },
-      { returnDocument: 'after' }
-    );
-
-    if (!notification) {
-      return res.status(404).json({ error: 'Notification not found' });
+    try {
+        const { id } = req.params;
+        if (!isValidUuid(id)) {
+            return res.status(400).json({ error: 'Invalid notification ID' });
+        }
+        const { data: notification, error } = await supabase
+            .from('notifications')
+            .update({ is_read: true })
+            .eq('id', id)
+            .eq('recipient_id', req.user.userId)
+            .select()
+            .maybeSingle();
+        if (error)
+            throw error;
+        if (!notification) {
+            return res.status(404).json({ error: 'Notification not found' });
+        }
+        return res.json(notification);
     }
-
-    return res.json(notification);
-  } catch (error) {
-    if (error.name === 'CastError') {
-      return res.status(400).json({ error: 'Invalid notification ID' });
+    catch (error) {
+        console.error(error);
+        return res.status(500).json({ error: 'Server error' });
     }
-    console.error(error);
-    return res.status(500).json({ error: 'Server error' });
-  }
 };
-
 /**
  * PATCH /api/notifications/read-all
  * Marks all unread notifications as read for the authenticated user.
  */
 exports.markAllAsRead = async (req, res) => {
-  try {
-    const result = await Notification.updateMany(
-      { recipientId: req.user.userId, isRead: false },
-      { $set: { isRead: true } }
-    );
-
-    return res.json({ updated: result.modifiedCount });
-  } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Server error' });
-  }
+    try {
+        const { data, error } = await supabase
+            .from('notifications')
+            .update({ is_read: true })
+            .eq('recipient_id', req.user.userId)
+            .eq('is_read', false)
+            .select('id');
+        if (error)
+            throw error;
+        return res.json({ updated: (data || []).length });
+    }
+    catch (error) {
+        console.error(error);
+        return res.status(500).json({ error: 'Server error' });
+    }
 };
+//# sourceMappingURL=notificationController.js.map
