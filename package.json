@@ -8,6 +8,7 @@
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "seed": "supabase db query --linked -f supabase/seed.sql",
+    "supabase:migrate": "supabase db push",
     "migrate:remove-company-spotlight": "node scripts/remove-company-spotlight.js",
     "migrate:zone-pricing-model": "node scripts/migrate-zone-pricing-model.js",
     "migrate:billing-cycle": "node scripts/migrate-billing-cycle-to-one-time.js",
