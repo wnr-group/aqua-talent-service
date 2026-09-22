@@ -1,6 +1,7 @@
-const express = require('express');
+import { Router } from 'express';
 
-const router = express.Router();
+const router = Router();
+
 const notificationController = require('../controllers/notificationController');
 const { requireAuth } = require('../middleware/auth');
 
@@ -19,4 +20,4 @@ router.get('/', notificationController.getNotifications);
 // PATCH /api/notifications/:id/read
 router.patch('/:id/read', notificationController.markAsRead);
 
-module.exports = router;
+export = router;

@@ -1,9 +1,9 @@
-const express = require('express');
+import { Router } from 'express';
 
 const paymentController = require('../controllers/paymentController');
 const { requireAuth, requireUserType } = require('../middleware/auth');
 
-const router = express.Router();
+const router = Router();
 
 router.post(
   '/create-order',
@@ -102,4 +102,4 @@ router.post(
   paymentController.verifyPayPerJob
 );
 
-module.exports = router;
+export = router;

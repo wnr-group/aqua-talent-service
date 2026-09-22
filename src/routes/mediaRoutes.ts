@@ -1,9 +1,10 @@
-const express = require('express');
+import { Request, Response, Router } from 'express';
+
 const { getPresignedUrl } = require('../services/mediaService');
 
-const router = express.Router();
+const router = Router();
 
-router.get('/url', async (req, res) => {
+router.get('/url', async (req: Request, res: Response) => {
   try {
     const { key } = req.query;
 
@@ -19,4 +20,4 @@ router.get('/url', async (req, res) => {
   }
 });
 
-module.exports = router;
+export = router;

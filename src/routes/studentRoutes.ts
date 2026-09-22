@@ -1,5 +1,6 @@
-const express = require('express');
-const router = express.Router();
+import { NextFunction, Request, Response, Router } from 'express';
+
+const router = Router();
 
 const studentController = require('../controllers/studentController');
 const studentMediaController = require('../controllers/studentMediaController');
@@ -26,8 +27,8 @@ router.post(
 	'/profile/resume',
 	requireAuth,
 	requireUserType('student'),
-	(req, res, next) => {
-		resumeUpload.single('resume')(req, res, (err) => {
+	(req: Request, res: Response, next: NextFunction) => {
+		resumeUpload.single('resume')(req, res, (err: any) => {
 			if (err) {
 				return res.status(400).json({ error: err.message });
 			}
@@ -40,8 +41,8 @@ router.post(
 	'/profile/video',
 	requireAuth,
 	requireUserType('student'),
-	(req, res, next) => {
-		videoUpload.single('video')(req, res, (err) => {
+	(req: Request, res: Response, next: NextFunction) => {
+		videoUpload.single('video')(req, res, (err: any) => {
 			if (err) {
 				const message = err.code === 'LIMIT_FILE_SIZE' ? 'Video must be under 30MB' : err.message;
 				return res.status(400).json({ error: message });
@@ -68,4 +69,4 @@ router.get('/zone-addons', requireAuth, requireUserType('student'), studentContr
 // Job credits addons endpoint
 router.get('/jobs-addons', requireAuth, requireUserType('student'), studentController.getJobsAddons);
 
-module.exports = router;
+export = router;

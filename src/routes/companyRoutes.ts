@@ -1,5 +1,6 @@
-const express = require('express');
-const router = express.Router();
+import { NextFunction, Request, Response, Router } from 'express';
+
+const router = Router();
 
 const companyController = require('../controllers/companyController');
 const { requireAuth, requireUserType } = require('../middleware/auth');
@@ -9,13 +10,13 @@ const { upload } = require('../middleware/upload');
 router.use(requireAuth);
 router.use(requireUserType('company'));
 
-const logoUploadMiddleware = (req, res, next) => {
-	upload.single('logo')(req, res, (err) => {
-		if (err) {
-			return res.status(400).json({ error: err.message });
-		}
-		next();
-	});
+const logoUploadMiddleware = (req: Request, res: Response, next: NextFunction) => {
+  upload.single('logo')(req, res, (err: any) => {
+    if (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    next();
+  });
 };
 
 router.get('/profile', companyController.getProfile);
@@ -36,4 +37,4 @@ router.get('/applications', companyController.getAllApplications);
 router.patch('/applications/:appId', companyController.updateApplication);
 router.get('/students/:studentId', companyController.getStudentProfile);
 
-module.exports = router;
+export = router;

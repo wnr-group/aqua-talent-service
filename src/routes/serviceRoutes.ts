@@ -1,8 +1,9 @@
-const express = require('express');
-const router = express.Router();
+import { Router } from 'express';
+
+const router = Router();
 
 const subscriptionController = require('../controllers/subscriptionController');
 
 router.get('/', subscriptionController.getAvailableServices);
 
-module.exports = router;
+export = router;

@@ -1,11 +1,9 @@
-const express = require('express');
-const router = express.Router();
+import { Router } from 'express';
+
+const router = Router();
 
 const authController = require('../controllers/authController');
 const { requireAuth } = require('../middleware/auth');
-
-
-console.log(authController);
 
 router.post('/login', authController.login);
 router.post('/logout', authController.logout);
@@ -16,19 +14,4 @@ router.post('/forgot-password', authController.forgotPassword);
 router.post('/verify-reset-token', authController.verifyResetToken);
 router.post('/reset-password', authController.resetPassword);
 
-
-exports.login = async (req, res) => {
-   
-};
-
-exports.logout = async (req, res) => {
-   res.json({ success: true, message: 'Logged out successfully' });
-};
-
-exports.getMe = async (req, res) => {
-   
-};
-
-
-
-module.exports = router;
+export = router;

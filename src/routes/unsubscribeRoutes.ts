@@ -1,9 +1,10 @@
-const express = require('express');
+import { Request, Response, Router } from 'express';
+
 const { logEmailSuccess } = require('../utils/emailLogger');
 
-const router = express.Router();
+const router = Router();
 
-router.get('/unsubscribe', (req, res) => {
+router.get('/unsubscribe', (req: Request, res: Response) => {
   const { email } = req.query;
 
   if (email) {
@@ -15,4 +16,4 @@ router.get('/unsubscribe', (req, res) => {
   res.send('You have been unsubscribed. If this was a mistake, you can re-enable notifications from your AquaTalentz settings.');
 });
 
-module.exports = router;
+export = router;

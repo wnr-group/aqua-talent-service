@@ -1,5 +1,6 @@
-const express = require('express');
-const router = express.Router();
+import { Router } from 'express';
+
+const router = Router();
 
 const adminController = require('../controllers/adminController');
 const { requireAuth, requireUserType } = require('../middleware/auth');
@@ -60,4 +61,4 @@ router.post('/addons', adminController.createAddon);
 router.patch('/addons/:addonId', adminController.updateAddon);
 router.delete('/addons/:addonId', adminController.deleteAddon);
 
-module.exports = router;
+export = router;
