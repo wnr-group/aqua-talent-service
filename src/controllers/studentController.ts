@@ -1,15 +1,11 @@
 import { Request, Response } from 'express';
 
 import { getSupabaseClient } from '../lib/supabase/client';
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { STUDENT_APPLICATION_STATUS_MAP } = require('../constants');
 import { getApplicationLimit } from '../services/subscriptionService';
 import { getSubscriptionUsage, incrementApplicationCount, decrementApplicationCount } from '../services/applicationService';
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { uploadStudentResume } = require('../services/mediaService');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const emailService = require('../services/emailService');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const notificationService = require('../services/notificationService');
 import { canAccessJob, getUnlockOptions, getQuotaUnlockOptions, getAccessibleZones } from '../services/zoneAccessService';
 

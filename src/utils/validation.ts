@@ -1,6 +1,5 @@
 import { z } from 'zod';
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
   JOB_TYPES,
   COMPANY_STATUSES,

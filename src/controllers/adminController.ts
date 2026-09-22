@@ -1,15 +1,10 @@
 import { Request, Response } from 'express';
 
 import { getSupabaseClient } from '../lib/supabase/client';
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const emailService = require('../services/emailService');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const notificationService = require('../services/notificationService');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { updateCompanyStatusSchema, updateJobStatusSchema, adminUpdateApplicationSchema } = require('../utils/validation');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { COMPANY_STATUSES, JOB_STATUSES, APPLICATION_STATUSES, JOB_TYPES, CONFIG_KEYS, CURRENCIES } = require('../constants');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { getPresignedUrl } = require('../services/mediaService');
 import { invalidatePublicCompanyProfileCache } from '../services/companyProfileService';
 

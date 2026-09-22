@@ -1,6 +1,5 @@
 import { getSupabaseClient } from '../lib/supabase/client';
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { DEFAULT_ZONES, DEFAULT_PLAN_ZONE_ASSIGNMENTS } = require('../constants/zonePricing');
 
 const supabase = getSupabaseClient();

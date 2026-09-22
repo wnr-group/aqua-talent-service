@@ -5,7 +5,6 @@ import geoip from 'geoip-lite';
 import { getSupabaseClient } from '../lib/supabase/client';
 import { createOrUpgradeSubscriptionForStudent } from './subscriptionController';
 import { getPayPerJobPricing } from '../services/zonePricingService';
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { getRazorpayInstance, getRazorpayCredentials, RAZORPAY_CONFIG_ERROR_CODES } = require('../services/razorpayService');
 
 type AuthedRequest = Request & { user?: { userId: string; userType: string }; rawBody?: string };

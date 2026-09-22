@@ -11,11 +11,8 @@ const {
   forgotPasswordSchema,
   verifyResetTokenSchema,
   resetPasswordSchema
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 } = require('../utils/validation');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { sendPasswordResetEmail } = require('../services/emailService');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const notificationService = require('../services/notificationService');
 
 const supabase = getSupabaseClient();

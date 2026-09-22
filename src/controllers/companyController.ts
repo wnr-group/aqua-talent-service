@@ -8,15 +8,10 @@ dayjs.extend(timezone);
 
 import { getSupabaseClient } from '../lib/supabase/client';
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { createJobSchema, createDraftJobSchema, updateJobSchema, companyProfileSchema } = require('../utils/validation');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { JOB_STATUSES, JOB_TYPES } = require('../constants');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { uploadCompanyLogo, getPresignedUrl } = require('../services/mediaService');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const emailService = require('../services/emailService');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const notificationService = require('../services/notificationService');
 
 import {

@@ -1,7 +1,6 @@
 import { Request, Response } from 'express';
 
 import { getSupabaseClient } from '../lib/supabase/client';
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { uploadStudentVideo } = require('../services/mediaService');
 
 type AuthedRequest = Request & { user?: { userId: string; userType: string }; file?: any };
