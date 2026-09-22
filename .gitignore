@@ -35,6 +35,8 @@ src/config/*.js
 src/config/*.js.map
 src/constants/*.js
 src/constants/*.js.map
+src/middleware/*.js
+src/middleware/*.js.map
 scripts/*.js
 scripts/*.js.map
 

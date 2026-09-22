@@ -1,4 +1,5 @@
-const multer = require('multer');
+import multer, { FileFilterCallback } from 'multer';
+import type { Request } from 'express';
 
 const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024; // 2MB
 const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
@@ -9,7 +10,7 @@ const VIDEO_MIME_TYPES = ['video/mp4', 'video/quicktime', 'video/webm', 'video/x
 
 const storage = multer.memoryStorage();
 
-const fileFilter = (req, file, cb) => {
+const fileFilter = (req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
   if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
     return cb(new Error('Only JPG, PNG, or WEBP images are allowed'));
   }
@@ -24,7 +25,7 @@ const upload = multer({
   }
 });
 
-const resumeFileFilter = (req, file, cb) => {
+const resumeFileFilter = (req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
   if (!RESUME_MIME_TYPES.includes(file.mimetype)) {
     return cb(new Error('Only PDF resumes are allowed'));
   }
@@ -39,7 +40,7 @@ const resumeUpload = multer({
   }
 });
 
-const videoFileFilter = (req, file, cb) => {
+const videoFileFilter = (req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
   if (!VIDEO_MIME_TYPES.includes(file.mimetype)) {
     return cb(new Error('Only video files are allowed'));
   }
@@ -54,7 +55,10 @@ const videoUpload = multer({
   }
 });
 
-module.exports = {
+// `export =` (rather than `export default`) so require('../middleware/upload')
+// in any remaining plain .js route file gets these members directly, exactly
+// matching the original module.exports shape.
+export = {
   upload,
   resumeUpload,
   videoUpload,
