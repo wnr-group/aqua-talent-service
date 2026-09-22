@@ -33,6 +33,8 @@ scripts/supabase-migration/**/*.js
 scripts/supabase-migration/**/*.js.map
 src/config/*.js
 src/config/*.js.map
+src/constants/*.js
+src/constants/*.js.map
 scripts/*.js
 scripts/*.js.map
 

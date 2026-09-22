@@ -2,7 +2,7 @@ const JOB_STATUSES = ['draft', 'pending', 'approved', 'rejected', 'unpublished',
 
 const APPLICATION_STATUSES = ['pending', 'reviewed', 'interview_scheduled', 'offer_extended', 'hired', 'rejected', 'withdrawn'];
 
-const STUDENT_APPLICATION_STATUS_MAP = {
+const STUDENT_APPLICATION_STATUS_MAP: Record<string, { studentFacingStatus: string; statusMessage: string }> = {
   pending: {
     studentFacingStatus: 'Under Review',
     statusMessage: "Your application is under review. We'll notify you of any updates."
@@ -86,7 +86,10 @@ const CURRENCIES = ['USD', 'EUR', 'GBP', 'INR', 'AUD', 'CAD'];
 // All plans are now quota-based (one-time purchase)
 const BILLING_CYCLES = ['one-time'];
 
-module.exports = {
+// `export =` (rather than `export default`) so require('../constants') in
+// any remaining plain .js file gets these members directly, exactly
+// matching the original module.exports shape.
+export = {
   JOB_STATUSES,
   APPLICATION_STATUSES,
   STUDENT_APPLICATION_STATUS_MAP,

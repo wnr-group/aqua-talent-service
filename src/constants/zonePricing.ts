@@ -21,13 +21,16 @@ const DEFAULT_ZONES = [
   }
 ];
 
-const DEFAULT_PLAN_ZONE_ASSIGNMENTS = {
+const DEFAULT_PLAN_ZONE_ASSIGNMENTS: Record<string, string[]> = {
   'Starter': ['Zone 1', 'Zone 2'],
   'Pro': ['Zone 1', 'Zone 2', 'Zone 3'],
   'Premium': DEFAULT_ZONES.map((zone) => zone.name)
 };
 
-module.exports = {
+// `export =` (rather than `export default`) so require('../constants/zonePricing')
+// in any remaining plain .js file gets these members directly, exactly
+// matching the original module.exports shape.
+export = {
   DEFAULT_ZONES,
   DEFAULT_PLAN_ZONE_ASSIGNMENTS
 };
