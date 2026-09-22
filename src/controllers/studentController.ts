@@ -633,12 +633,13 @@ exports.withdrawApplication = async (req: AuthedRequest, res: Response) => {
       return res.status(400).json({ error: message });
     }
 
-    const { data: updatedApplication } = await supabase
+    const { data: updatedApplication, error: withdrawError } = await supabase
       .from('applications')
       .update({ status: 'withdrawn' })
       .eq('id', appId)
       .select()
       .single();
+    if (withdrawError) throw withdrawError;
 
     await decrementApplicationCount(student.id);
 
@@ -863,7 +864,8 @@ exports.uploadResume = async (req: AuthedRequest & { file?: any }, res: Response
 
     const resumeUrl = await uploadStudentResume(req.file);
 
-    await supabase.from('students').update({ resume_url: resumeUrl }).eq('id', student.id);
+    const { error: resumeUpdateError } = await supabase.from('students').update({ resume_url: resumeUrl }).eq('id', student.id);
+    if (resumeUpdateError) throw resumeUpdateError;
 
     res.json({ resumeUrl });
   } catch (error: any) {

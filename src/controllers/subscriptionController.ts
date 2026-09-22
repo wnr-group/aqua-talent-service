@@ -260,7 +260,13 @@ export const createOrUpgradeSubscriptionForStudent = async ({
       addonZonesToPreserve = (addonZones || []).map((z) => z.zone_id);
 
       // Mark previous subscription as exhausted
-      await supabase.from('active_subscriptions').update({ status: 'exhausted', auto_renew: false }).eq('id', curSub.id);
+      const { error: exhaustError } = await supabase.from('active_subscriptions').update({ status: 'exhausted', auto_renew: false }).eq('id', curSub.id);
+      if (exhaustError) {
+        // Not fatal - student.current_subscription_id gets repointed to the
+        // new subscription below regardless, this is housekeeping on the old
+        // row only, but a failure here must still be visible.
+        console.error('[createOrUpgradeSubscriptionForStudent] Failed to mark previous subscription exhausted', { subscriptionId: curSub.id, error: exhaustError });
+      }
     }
   }
 
@@ -310,10 +316,11 @@ export const createOrUpgradeSubscriptionForStudent = async ({
     paymentRecord = payment;
   }
 
-  await supabase
+  const { error: linkSubscriptionError } = await supabase
     .from('students')
     .update({ current_subscription_id: subscription.id, subscription_tier: service.tier === 'free' ? 'free' : 'paid' })
     .eq('id', student.id);
+  if (linkSubscriptionError) throw linkSubscriptionError;
 
   // Populate subscription zones from plan configuration
   await ensureSubscriptionZonesForPlan({ subscriptionId: subscription.id, serviceId: service.id });
@@ -325,7 +332,10 @@ export const createOrUpgradeSubscriptionForStudent = async ({
       zone_id: zoneId,
       source: 'addon' as const
     }));
-    await supabase.from('subscription_zones').upsert(rows, { onConflict: 'subscription_id,zone_id', ignoreDuplicates: true });
+    const { error: preserveZonesError } = await supabase.from('subscription_zones').upsert(rows, { onConflict: 'subscription_id,zone_id', ignoreDuplicates: true });
+    if (preserveZonesError) {
+      console.error('[createOrUpgradeSubscriptionForStudent] Failed to preserve addon zones on new subscription', { subscriptionId: subscription.id, error: preserveZonesError });
+    }
   }
 
   // Also preserve zone-addon records from previous subscription. Job addon
@@ -350,7 +360,10 @@ export const createOrUpgradeSubscriptionForStudent = async ({
           payment_record_id: addon.payment_record_id,
           quantity: addon.quantity
         }));
-        await supabase.from('subscription_addons').upsert(rows, { onConflict: 'subscription_id,addon_id', ignoreDuplicates: true });
+        const { error: preserveAddonsError } = await supabase.from('subscription_addons').upsert(rows, { onConflict: 'subscription_id,addon_id', ignoreDuplicates: true });
+        if (preserveAddonsError) {
+          console.error('[createOrUpgradeSubscriptionForStudent] Failed to preserve addon records on new subscription', { subscriptionId: subscription.id, error: preserveAddonsError });
+        }
       }
     }
   }
@@ -466,7 +479,10 @@ exports.updateSubscription = async (req: AuthedRequest, res: Response) => {
       .maybeSingle();
 
     if (!subscription) {
-      await supabase.from('students').update({ current_subscription_id: null, subscription_tier: 'free' }).eq('id', student.id);
+      const { error: clearStaleError } = await supabase.from('students').update({ current_subscription_id: null, subscription_tier: 'free' }).eq('id', student.id);
+      if (clearStaleError) {
+        console.error('[updateSubscription] Failed to clear stale subscription pointer', { studentId: student.id, error: clearStaleError });
+      }
       return res.status(404).json({ error: 'Subscription not found' });
     }
 
@@ -534,7 +550,8 @@ exports.updateSubscription = async (req: AuthedRequest, res: Response) => {
     if (error) throw error;
 
     if (updatedSubscription.status === 'cancelled') {
-      await supabase.from('students').update({ current_subscription_id: null, subscription_tier: 'free' }).eq('id', student.id);
+      const { error: clearOnCancelError } = await supabase.from('students').update({ current_subscription_id: null, subscription_tier: 'free' }).eq('id', student.id);
+      if (clearOnCancelError) throw clearOnCancelError;
     }
 
     const fullService = await getFullServiceById(updatedSubscription.service_id);
@@ -554,7 +571,7 @@ exports.cancelSubscription = async (req: AuthedRequest, res: Response) => {
       return res.status(404).json({ error: 'No active subscription found for student' });
     }
 
-    const { data: subscription } = await supabase
+    const { data: subscription, error: cancelError } = await supabase
       .from('active_subscriptions')
       .update({ status: 'cancelled', auto_renew: false })
       .eq('id', student.current_subscription_id)
@@ -562,13 +579,18 @@ exports.cancelSubscription = async (req: AuthedRequest, res: Response) => {
       .in('status', ['active', 'pending'])
       .select()
       .maybeSingle();
+    if (cancelError) throw cancelError;
 
     if (!subscription) {
-      await supabase.from('students').update({ current_subscription_id: null, subscription_tier: 'free' }).eq('id', student.id);
+      const { error: clearStaleError } = await supabase.from('students').update({ current_subscription_id: null, subscription_tier: 'free' }).eq('id', student.id);
+      if (clearStaleError) {
+        console.error('[cancelSubscription] Failed to clear stale subscription pointer', { studentId: student.id, error: clearStaleError });
+      }
       return res.status(404).json({ error: 'Subscription not found or already inactive' });
     }
 
-    await supabase.from('students').update({ current_subscription_id: null, subscription_tier: 'free' }).eq('id', student.id);
+    const { error: clearAfterCancelError } = await supabase.from('students').update({ current_subscription_id: null, subscription_tier: 'free' }).eq('id', student.id);
+    if (clearAfterCancelError) throw clearAfterCancelError;
 
     const fullService = await getFullServiceById(subscription.service_id);
 

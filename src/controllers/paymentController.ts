@@ -120,7 +120,8 @@ const activateSubscriptionForPaymentRecord = async ({
       ...paymentDetails
     });
 
-    await supabase.from('payment_records').update(updates as any).eq('id', paymentRecord.id);
+    const { error: skipUpdateError } = await supabase.from('payment_records').update(updates as any).eq('id', paymentRecord.id);
+    if (skipUpdateError) throw skipUpdateError;
 
     console.log('Subscription already activated (idempotent skip):', String(paymentRecord.subscription_id));
 
@@ -163,7 +164,7 @@ const activateSubscriptionForPaymentRecord = async ({
     paymentAmount: paymentRecord.amount
   });
 
-  await supabase
+  const { error: linkUpdateError } = await supabase
     .from('payment_records')
     .update({
       subscription_id: result.subscription.id,
@@ -179,6 +180,18 @@ const activateSubscriptionForPaymentRecord = async ({
       })
     })
     .eq('id', paymentRecord.id);
+  if (linkUpdateError) {
+    // The subscription itself was already created successfully at this point -
+    // only the payment_records bookkeeping failed. Log loudly (this is the
+    // exact silent-entitlement-mismatch bug this check exists to catch) but
+    // don't throw, since throwing here would make the caller think the whole
+    // activation failed when the student's subscription is actually live.
+    console.error('[activateSubscriptionForPaymentRecord] Failed to link payment_records to new subscription - subscription IS active, only the payment record link failed', {
+      paymentRecordId: paymentRecord.id,
+      subscriptionId: result.subscription.id,
+      error: linkUpdateError
+    });
+  }
 
   console.log('Subscription created:', String(result.subscription.id));
 
@@ -261,7 +274,7 @@ exports.createOrder = async (req: AuthedRequest, res: Response) => {
           });
         }
 
-        await supabase
+        const { error: invalidateError } = await supabase
           .from('payment_records')
           .update({
             status: 'failed',
@@ -271,8 +284,13 @@ exports.createOrder = async (req: AuthedRequest, res: Response) => {
             })
           })
           .eq('id', existingPendingOrder.id);
+        // Best-effort cleanup of a stale order - a new order still gets created
+        // below either way, so log and continue rather than aborting the request.
+        if (invalidateError) {
+          console.error('[createOrder] Failed to invalidate stale pending payment record', { id: existingPendingOrder.id, error: invalidateError });
+        }
       } catch (fetchError: any) {
-        await supabase
+        const { error: invalidateError } = await supabase
           .from('payment_records')
           .update({
             status: 'failed',
@@ -282,6 +300,9 @@ exports.createOrder = async (req: AuthedRequest, res: Response) => {
             })
           })
           .eq('id', existingPendingOrder.id);
+        if (invalidateError) {
+          console.error('[createOrder] Failed to invalidate stale pending payment record after fetch error', { id: existingPendingOrder.id, error: invalidateError });
+        }
       }
     }
 
@@ -293,7 +314,7 @@ exports.createOrder = async (req: AuthedRequest, res: Response) => {
       notes: { serviceId: String(service.id), studentId: String(student.id) }
     });
 
-    await supabase.from('payment_records').insert({
+    const { error: insertOrderError } = await supabase.from('payment_records').insert({
       student_id: student.id,
       service_id: service.id,
       subscription_id: null,
@@ -312,6 +333,7 @@ exports.createOrder = async (req: AuthedRequest, res: Response) => {
         currency: order.currency
       }
     });
+    if (insertOrderError) throw insertOrderError;
 
     return res.status(201).json({ orderId: order.id, amount: order.amount, currency: order.currency, key: keyId, serviceName: service.name });
   } catch (error: any) {
@@ -659,21 +681,28 @@ exports.verifyZoneAddonPayment = async (req: AuthedRequest, res: Response) => {
       .maybeSingle();
 
     if (existingAddon) {
-      await supabase
+      const { error: addonUpdateError } = await supabase
         .from('subscription_addons')
         .update({ quantity: existingAddon.quantity + 1, payment_record_id: paymentRecord.id })
         .eq('id', existingAddon.id);
+      if (addonUpdateError) throw addonUpdateError;
     } else {
-      await supabase.from('subscription_addons').insert({
+      const { error: addonInsertError } = await supabase.from('subscription_addons').insert({
         subscription_id: subscriptionId,
         addon_id: addonId,
         quantity: 1,
         payment_record_id: paymentRecord.id
       });
+      if (addonInsertError) throw addonInsertError;
     }
 
     if (!addon.unlock_all_zones && zoneIdsStr !== 'all') {
-      const zoneIds = JSON.parse(zoneIdsStr);
+      let zoneIds: string[];
+      try {
+        zoneIds = JSON.parse(zoneIdsStr);
+      } catch {
+        throw Object.assign(new Error('Invalid zoneIds format on order'), { status: 400 });
+      }
 
       for (const zoneId of zoneIds) {
         const { data: existingZone } = await supabase
@@ -684,11 +713,12 @@ exports.verifyZoneAddonPayment = async (req: AuthedRequest, res: Response) => {
           .maybeSingle();
 
         if (!existingZone) {
-          await supabase.from('subscription_zones').insert({
+          const { error: zoneInsertError } = await supabase.from('subscription_zones').insert({
             subscription_id: subscriptionId,
             zone_id: zoneId,
             source: 'addon'
           });
+          if (zoneInsertError) throw zoneInsertError;
         }
       }
     }
@@ -831,10 +861,11 @@ exports.verifyPayPerJob = async (req: AuthedRequest, res: Response) => {
       .single();
     if (payError) throw payError;
 
-    await supabase
+    const { error: purchaseUpdateError } = await supabase
       .from('pay_per_job_purchases')
       .update({ status: 'completed', completed_at: new Date().toISOString(), payment_record_id: paymentRecord.id })
       .eq('id', purchase.id);
+    if (purchaseUpdateError) throw purchaseUpdateError;
 
     res.json({ success: true, paymentId: razorpay_payment_id });
   } catch (error) {

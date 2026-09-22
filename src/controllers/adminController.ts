@@ -53,10 +53,10 @@ const getConfigValue = async (key: string, defaultValue: any = null) => {
 
 const setConfigValue = async (key: string, value: any, description: string, updatedBy: string) => {
   const { data: existing } = await supabase.from('system_config').select('id').eq('key', key).maybeSingle();
-  if (existing) {
-    return supabase.from('system_config').update({ value, description, updated_by: updatedBy }).eq('id', existing.id);
-  }
-  return supabase.from('system_config').insert({ key, value, description, updated_by: updatedBy });
+  const { error } = existing
+    ? await supabase.from('system_config').update({ value, description, updated_by: updatedBy }).eq('id', existing.id)
+    : await supabase.from('system_config').insert({ key, value, description, updated_by: updatedBy });
+  if (error) throw error;
 };
 
 // ─── Dashboard ──────────────────────────────────────────────────────────────
@@ -247,15 +247,16 @@ exports.getCompanyProfileAdmin = async (req: Request, res: Response) => {
 
     const { data: company } = await supabase.from('companies').select('*, users ( is_active )').eq('id', companyId).maybeSingle();
     if (!company) {
-      return res.status(404).json({ message: 'Company not found' });
+      return res.status(404).json({ error: 'Company not found' });
     }
 
     const { users, ...companyObj } = company as any;
     (companyObj as any).isActive = users?.is_active !== false;
 
     return res.json(companyObj);
-  } catch (error: any) {
-    return res.status(500).json({ message: error.message });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Server error' });
   }
 };
 
@@ -265,7 +266,7 @@ exports.updateCompanyProfileAdmin = async (req: Request, res: Response) => {
     const { description, website, industry, size, foundedYear, socialLinks } = req.body || {};
 
     if (!isValidUuid(companyId)) {
-      return res.status(400).json({ message: 'Invalid company ID format' });
+      return res.status(400).json({ error: 'Invalid company ID format' });
     }
 
     const isValidUrl = (value: any) => {
@@ -278,12 +279,12 @@ exports.updateCompanyProfileAdmin = async (req: Request, res: Response) => {
       }
     };
 
-    if (!isValidUrl(website)) return res.status(400).json({ message: 'Invalid website URL' });
-    if (!isValidUrl(socialLinks?.linkedin)) return res.status(400).json({ message: 'Invalid LinkedIn URL' });
-    if (!isValidUrl(socialLinks?.twitter)) return res.status(400).json({ message: 'Invalid Twitter URL' });
+    if (!isValidUrl(website)) return res.status(400).json({ error: 'Invalid website URL' });
+    if (!isValidUrl(socialLinks?.linkedin)) return res.status(400).json({ error: 'Invalid LinkedIn URL' });
+    if (!isValidUrl(socialLinks?.twitter)) return res.status(400).json({ error: 'Invalid Twitter URL' });
 
     const { data: company } = await supabase.from('companies').select('*').eq('id', companyId).maybeSingle();
-    if (!company) return res.status(404).json({ message: 'Company not found' });
+    if (!company) return res.status(404).json({ error: 'Company not found' });
 
     const updates: Record<string, any> = {};
     if (description !== undefined) updates.description = description;
@@ -303,8 +304,9 @@ exports.updateCompanyProfileAdmin = async (req: Request, res: Response) => {
     invalidatePublicCompanyProfileCache(companyId);
 
     return res.status(200).json(updated);
-  } catch (error: any) {
-    return res.status(500).json({ message: error.message });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Server error' });
   }
 };
 
@@ -314,12 +316,14 @@ exports.setCompanyActiveStatus = async (req: Request, res: Response) => {
     const { isActive } = req.body;
 
     const { data: company } = await supabase.from('companies').select('user_id').eq('id', companyId).maybeSingle();
-    if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
+    if (!company) return res.status(404).json({ error: 'Company not found' });
 
-    await supabase.from('users').update({ is_active: isActive }).eq('id', company.user_id);
+    const { error: statusUpdateError } = await supabase.from('users').update({ is_active: isActive }).eq('id', company.user_id);
+    if (statusUpdateError) throw statusUpdateError;
     res.json({ success: true, isActive });
-  } catch (error: any) {
-    res.status(500).json({ success: false, message: error.message });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
   }
 };
 
@@ -446,11 +450,12 @@ exports.updateJob = async (req: Request, res: Response) => {
     if (error) throw error;
 
     if (parsed.status === 'closed') {
-      await supabase
+      const { error: rejectAppsError } = await supabase
         .from('applications')
         .update({ status: 'rejected', rejection_reason: 'Job posting has been closed' })
         .eq('job_posting_id', jobId)
         .in('status', ['pending', 'reviewed']);
+      if (rejectAppsError) throw rejectAppsError;
     }
 
     res.json({
@@ -945,7 +950,13 @@ exports.assignStudentSubscription = async (req: Request, res: Response) => {
       if (currentSub) {
         const { data: currentService } = await supabase.from('available_services').select('tier').eq('id', currentSub.service_id).maybeSingle();
         if (currentService?.tier !== 'free') {
-          await supabase.from('active_subscriptions').update({ status: 'exhausted', auto_renew: false }).eq('id', currentSub.id);
+          const { error: exhaustError } = await supabase.from('active_subscriptions').update({ status: 'exhausted', auto_renew: false }).eq('id', currentSub.id);
+          if (exhaustError) {
+            // Not fatal to this request - the student's current_subscription_id
+            // gets repointed to the new subscription below either way, this
+            // only affects housekeeping on the old row - but must be logged.
+            console.error('[assignStudentSubscription] Failed to mark previous subscription exhausted', { subscriptionId: currentSub.id, error: exhaustError });
+          }
         }
       }
     }
@@ -965,7 +976,8 @@ exports.assignStudentSubscription = async (req: Request, res: Response) => {
       .single();
     if (error) throw error;
 
-    await supabase.from('students').update({ current_subscription_id: subscription.id, subscription_tier: service.tier }).eq('id', student.id);
+    const { error: linkError } = await supabase.from('students').update({ current_subscription_id: subscription.id, subscription_tier: service.tier }).eq('id', student.id);
+    if (linkError) throw linkError;
 
     res.json({
       success: true,
@@ -998,12 +1010,14 @@ exports.setStudentActiveStatus = async (req: Request, res: Response) => {
     const { isActive } = req.body;
 
     const { data: student } = await supabase.from('students').select('user_id').eq('id', studentId).maybeSingle();
-    if (!student) return res.status(404).json({ success: false, message: 'Student not found' });
+    if (!student) return res.status(404).json({ error: 'Student not found' });
 
-    await supabase.from('users').update({ is_active: isActive }).eq('id', student.user_id);
+    const { error: statusUpdateError } = await supabase.from('users').update({ is_active: isActive }).eq('id', student.user_id);
+    if (statusUpdateError) throw statusUpdateError;
     res.json({ success: true, isActive });
-  } catch (error: any) {
-    res.status(500).json({ success: false, message: error.message });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
   }
 };
 
@@ -1228,7 +1242,8 @@ exports.deleteSubscriptionPlan = async (req: Request, res: Response) => {
     if (!plan) return res.status(404).json({ error: 'Subscription plan not found' });
 
     // Soft delete by setting is_active to false
-    await supabase.from('available_services').update({ is_active: false }).eq('id', planId);
+    const { error: deactivateError } = await supabase.from('available_services').update({ is_active: false }).eq('id', planId);
+    if (deactivateError) throw deactivateError;
 
     res.json({ success: true, message: 'Subscription plan deactivated' });
   } catch (error) {
@@ -1424,8 +1439,10 @@ exports.deleteZone = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Cannot delete zone with countries that have jobs assigned', jobCount });
     }
 
-    await supabase.from('zone_countries').delete().eq('zone_id', zoneId);
-    await supabase.from('zones').delete().eq('id', zoneId);
+    const { error: deleteCountriesError } = await supabase.from('zone_countries').delete().eq('zone_id', zoneId);
+    if (deleteCountriesError) throw deleteCountriesError;
+    const { error: deleteZoneError } = await supabase.from('zones').delete().eq('id', zoneId);
+    if (deleteZoneError) throw deleteZoneError;
 
     res.json({ success: true });
   } catch (error) {
@@ -1484,7 +1501,8 @@ exports.removeCountryFromZone = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Cannot remove country that has jobs assigned', jobCount });
     }
 
-    await supabase.from('zone_countries').delete().eq('id', countryId);
+    const { error: deleteCountryError } = await supabase.from('zone_countries').delete().eq('id', countryId);
+    if (deleteCountryError) throw deleteCountryError;
 
     res.json({ success: true });
   } catch (error) {
@@ -1528,12 +1546,14 @@ exports.setPlanZones = async (req: Request, res: Response) => {
 
     let allZonesFlag = plan.all_zones_included;
     if (typeof allZonesIncluded === 'boolean') {
-      await supabase.from('available_services').update({ all_zones_included: allZonesIncluded }).eq('id', planId);
+      const { error: flagUpdateError } = await supabase.from('available_services').update({ all_zones_included: allZonesIncluded }).eq('id', planId);
+      if (flagUpdateError) throw flagUpdateError;
       allZonesFlag = allZonesIncluded;
     }
 
     if (allZonesFlag) {
-      await supabase.from('plan_zones').delete().eq('plan_id', planId);
+      const { error: clearZonesError } = await supabase.from('plan_zones').delete().eq('plan_id', planId);
+      if (clearZonesError) throw clearZonesError;
       return res.json({ planId, planName: plan.name, allZonesIncluded: true, zones: [] });
     }
 
@@ -1550,11 +1570,13 @@ exports.setPlanZones = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Some zone IDs are invalid' });
     }
 
-    await supabase.from('plan_zones').delete().eq('plan_id', planId);
+    const { error: replaceZonesError } = await supabase.from('plan_zones').delete().eq('plan_id', planId);
+    if (replaceZonesError) throw replaceZonesError;
 
     if (validZoneIds.length > 0) {
       const rows = validZoneIds.map((zoneId: string) => ({ plan_id: planId, zone_id: zoneId }));
-      await supabase.from('plan_zones').insert(rows);
+      const { error: insertZonesError } = await supabase.from('plan_zones').insert(rows);
+      if (insertZonesError) throw insertZonesError;
     }
 
     res.json({
@@ -1721,7 +1743,8 @@ exports.deleteAddon = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Cannot delete addon that has been purchased', purchaseCount });
     }
 
-    await supabase.from('addons').delete().eq('id', addonId);
+    const { error: deleteAddonError } = await supabase.from('addons').delete().eq('id', addonId);
+    if (deleteAddonError) throw deleteAddonError;
 
     res.json({ success: true });
   } catch (error) {

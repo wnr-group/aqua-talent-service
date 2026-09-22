@@ -398,7 +398,8 @@ exports.registerStudent = async (req: Request, res: Response) => {
     }
 
     // Update student with subscription ID
-    await supabase.from('students').update({ current_subscription_id: freeSubscription.id }).eq('id', student.id);
+    const { error: linkSubscriptionError } = await supabase.from('students').update({ current_subscription_id: freeSubscription.id }).eq('id', student.id);
+    if (linkSubscriptionError) throw linkSubscriptionError;
 
     res.status(201).json({ success: true });
 
@@ -504,13 +505,14 @@ exports.forgotPassword = async (req: Request, res: Response) => {
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
 
     // Store token
-    await supabase.from('password_reset_tokens').insert({
+    const { error: tokenInsertError } = await supabase.from('password_reset_tokens').insert({
       token,
       user_id: user.id,
       user_type: userType,
       email: email.toLowerCase().trim(),
       expires_at: expiresAt.toISOString()
     });
+    if (tokenInsertError) throw tokenInsertError;
 
     // Build reset URL
     const frontendUrl = getFrontendBaseUrl();
@@ -606,10 +608,12 @@ exports.resetPassword = async (req: Request, res: Response) => {
     const passwordHash = await bcrypt.hash(password, 10);
 
     // Update user's password
-    await supabase.from('users').update({ password_hash: passwordHash }).eq('id', resetToken.user_id);
+    const { error: passwordUpdateError } = await supabase.from('users').update({ password_hash: passwordHash }).eq('id', resetToken.user_id);
+    if (passwordUpdateError) throw passwordUpdateError;
 
     // Mark token as used
-    await supabase.from('password_reset_tokens').update({ used_at: new Date().toISOString() }).eq('id', resetToken.id);
+    const { error: tokenUpdateError } = await supabase.from('password_reset_tokens').update({ used_at: new Date().toISOString() }).eq('id', resetToken.id);
+    if (tokenUpdateError) throw tokenUpdateError;
 
     res.json({
       success: true,

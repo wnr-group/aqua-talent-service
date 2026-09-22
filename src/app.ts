@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { getSupabaseClient } from './lib/supabase/client';
+import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 
 const app = express();
 
@@ -66,17 +67,6 @@ app.post('/api/webhooks/razorpay', paymentController.handleWebhook);
 app.get('/api/geo-location', paymentController.getGeoLocation);
 app.use('/', unsubscribeRoutes);
 
-// testMailRoutes.mjs is intentionally native ESM (see routes conversion
-// commit) and isn't part of the tsc program, so it has no type declarations.
-// @ts-expect-error - TS7016: no declaration file for this dynamic import target
-import('./routes/testMailRoutes.mjs')
-  .then(({ default: testMailRouter }: any) => {
-    app.use('/api', testMailRouter);
-  })
-  .catch((error: unknown) => {
-    console.error('[test-mail] Failed to register test mail route', error);
-  });
-
 // Health check
 app.get('/api/health', async (req: Request, res: Response) => {
   let database = 'disconnected';
@@ -97,6 +87,26 @@ app.get('/api/health', async (req: Request, res: Response) => {
     databaseHost: process.env.SUPABASE_URL ? new URL(process.env.SUPABASE_URL).host : null
   });
 });
+
+// testMailRoutes.mjs is intentionally native ESM (see routes conversion
+// commit) and isn't part of the tsc program, so it has no type declarations.
+// notFoundHandler/errorHandler are registered in this same chain (success or
+// failure) rather than synchronously above, so they can never shadow the
+// route this async import is still in the middle of registering.
+// @ts-expect-error - TS7016: no declaration file for this dynamic import target
+import('./routes/testMailRoutes.mjs')
+  .then(({ default: testMailRouter }: any) => {
+    app.use('/api', testMailRouter);
+  })
+  .catch((error: unknown) => {
+    console.error('[test-mail] Failed to register test mail route', error);
+  })
+  .finally(() => {
+    // Must stay last: unmatched-route handler, then the error-handling
+    // middleware (arity 4 is what makes Express treat it as one).
+    app.use(notFoundHandler);
+    app.use(errorHandler);
+  });
 
 // `export =` (rather than `export default`) so require('./app') in
 // server.js gets the app instance directly, exactly matching the

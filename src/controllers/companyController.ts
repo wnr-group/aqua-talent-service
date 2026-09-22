@@ -327,13 +327,15 @@ exports.updateJob = async (req: AuthedRequest, res: Response) => {
       if (job.status === 'closed') return res.status(400).json({ error: 'Job is already closed' });
       if (job.status === 'draft') return res.status(400).json({ error: 'Draft jobs cannot be closed' });
 
-      const { data: updatedJob } = await supabase.from('job_postings').update({ status: 'closed' }).eq('id', jobId).select().single();
+      const { data: updatedJob, error: closeError } = await supabase.from('job_postings').update({ status: 'closed' }).eq('id', jobId).select().single();
+      if (closeError) throw closeError;
 
-      await supabase
+      const { error: rejectAppsError } = await supabase
         .from('applications')
         .update({ status: 'rejected', rejection_reason: 'Job posting has been closed' })
         .eq('job_posting_id', jobId)
         .in('status', ['pending', 'reviewed']);
+      if (rejectAppsError) throw rejectAppsError;
 
       return res.json(updatedJob);
     }
@@ -343,18 +345,20 @@ exports.updateJob = async (req: AuthedRequest, res: Response) => {
       if (job.status !== 'approved') {
         return res.status(400).json({ error: 'Only approved jobs can be unpublished' });
       }
-      const { data: updatedJob } = await supabase.from('job_postings').update({ status: 'unpublished' }).eq('id', jobId).select().single();
+      const { data: updatedJob, error: unpublishError } = await supabase.from('job_postings').update({ status: 'unpublished' }).eq('id', jobId).select().single();
+      if (unpublishError) throw unpublishError;
       return res.json(updatedJob);
     }
 
     // Handle republish request
     if ((req.body.status === 'approved' || req.body.status === 'pending') && job.status === 'unpublished') {
-      const { data: updatedJob } = await supabase
+      const { data: updatedJob, error: republishError } = await supabase
         .from('job_postings')
         .update({ status: 'approved', approved_at: new Date().toISOString() })
         .eq('id', jobId)
         .select()
         .single();
+      if (republishError) throw republishError;
       return res.json(updatedJob);
     }
 
@@ -469,7 +473,8 @@ exports.unpublishJob = async (req: AuthedRequest, res: Response) => {
       return res.status(400).json({ error: 'Only approved jobs can be unpublished' });
     }
 
-    const { data: updatedJob } = await supabase.from('job_postings').update({ status: 'unpublished' }).eq('id', jobId).select().single();
+    const { data: updatedJob, error: unpublishError } = await supabase.from('job_postings').update({ status: 'unpublished' }).eq('id', jobId).select().single();
+    if (unpublishError) throw unpublishError;
     res.json(updatedJob);
   } catch (error) {
     console.error(error);
@@ -496,12 +501,13 @@ exports.republishJob = async (req: AuthedRequest, res: Response) => {
       return res.status(400).json({ error: 'Only unpublished jobs can be republished' });
     }
 
-    const { data: updatedJob } = await supabase
+    const { data: updatedJob, error: republishError } = await supabase
       .from('job_postings')
       .update({ status: 'approved', approved_at: new Date().toISOString() })
       .eq('id', jobId)
       .select()
       .single();
+    if (republishError) throw republishError;
     res.json(updatedJob);
   } catch (error) {
     console.error(error);
@@ -529,13 +535,15 @@ exports.closeJob = async (req: AuthedRequest, res: Response) => {
       return res.status(400).json({ error: 'Draft jobs cannot be closed. Delete them instead.' });
     }
 
-    const { data: updatedJob } = await supabase.from('job_postings').update({ status: 'closed' }).eq('id', jobId).select().single();
+    const { data: updatedJob, error: closeError } = await supabase.from('job_postings').update({ status: 'closed' }).eq('id', jobId).select().single();
+    if (closeError) throw closeError;
 
-    await supabase
+    const { error: rejectAppsError } = await supabase
       .from('applications')
       .update({ status: 'rejected', rejection_reason: 'Job posting has been closed' })
       .eq('job_posting_id', jobId)
       .in('status', ['pending', 'reviewed']);
+    if (rejectAppsError) throw rejectAppsError;
 
     res.json(updatedJob);
   } catch (error) {
@@ -789,7 +797,8 @@ exports.uploadLogo = async (req: AuthedRequest & { file?: any }, res: Response) 
 
     try {
       const logoUrl = await uploadCompanyLogo(req.file);
-      await supabase.from('companies').update({ logo: logoUrl }).eq('id', company.id);
+      const { error: logoUpdateError } = await supabase.from('companies').update({ logo: logoUrl }).eq('id', company.id);
+      if (logoUpdateError) throw logoUpdateError;
       invalidatePublicCompanyProfileCache(company.id);
       return res.json({ logo: logoUrl });
     } catch (uploadError) {
@@ -920,10 +929,12 @@ exports.updateApplication = async (req: AuthedRequest, res: Response) => {
       update.rejection_source = null;
     }
 
-    await supabase.from('applications').update(update as any).eq('id', appId);
+    const { error: appUpdateError } = await supabase.from('applications').update(update as any).eq('id', appId);
+    if (appUpdateError) throw appUpdateError;
 
     if (status === 'hired') {
-      await supabase.from('students').update({ is_hired: true }).eq('id', application.student_id);
+      const { error: hiredUpdateError } = await supabase.from('students').update({ is_hired: true }).eq('id', application.student_id);
+      if (hiredUpdateError) throw hiredUpdateError;
     }
 
     const [{ data: updatedApp }, { data: student }, { data: job }] = await Promise.all([

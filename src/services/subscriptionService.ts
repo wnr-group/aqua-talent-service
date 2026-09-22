@@ -33,7 +33,14 @@ export const checkSubscriptionStatus = async (studentId: string) => {
     .maybeSingle();
 
   if (!subscription) {
-    await supabase.from('students').update({ current_subscription_id: null, subscription_tier: 'free' }).eq('id', studentId);
+    // Best-effort self-heal of a stale pointer - the return value below is
+    // already correct regardless of whether this write succeeds, so log
+    // instead of throwing (this is a read-path helper called on every
+    // dashboard/status check, not just error-recovery flows).
+    const { error: clearStaleError } = await supabase.from('students').update({ current_subscription_id: null, subscription_tier: 'free' }).eq('id', studentId);
+    if (clearStaleError) {
+      console.error('[checkSubscriptionStatus] Failed to clear stale subscription pointer', { studentId, error: clearStaleError });
+    }
     return { tier: 'free' as const, status: 'free', isActive: true, inGracePeriod: false, subscription: null as any };
   }
 
@@ -53,7 +60,12 @@ export const checkSubscriptionStatus = async (studentId: string) => {
 
   let status = subscription.status;
   if (!isActive && subscription.status !== 'expired' && endDate < now) {
-    await supabase.from('active_subscriptions').update({ status: 'expired' }).eq('id', subscription.id);
+    // Lazy-expiration persist - the computed status/isActive returned below
+    // are already correct in-memory either way, so log rather than throw.
+    const { error: expireError } = await supabase.from('active_subscriptions').update({ status: 'expired' }).eq('id', subscription.id);
+    if (expireError) {
+      console.error('[checkSubscriptionStatus] Failed to persist expired status', { subscriptionId: subscription.id, error: expireError });
+    }
     status = 'expired';
   }
 

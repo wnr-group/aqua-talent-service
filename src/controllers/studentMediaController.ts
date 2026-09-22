@@ -21,7 +21,8 @@ exports.uploadIntroVideo = async (req: AuthedRequest, res: Response) => {
 
     const introVideoUrl = await uploadStudentVideo(req.file, student.id);
 
-    await supabase.from('students').update({ intro_video_url: introVideoUrl }).eq('id', student.id);
+    const { error: updateError } = await supabase.from('students').update({ intro_video_url: introVideoUrl }).eq('id', student.id);
+    if (updateError) throw updateError;
 
     res.json({ introVideoUrl });
   } catch (error: any) {
@@ -47,7 +48,8 @@ exports.deleteIntroVideo = async (req: AuthedRequest, res: Response) => {
       return res.status(400).json({ error: 'No intro video to delete' });
     }
 
-    await supabase.from('students').update({ intro_video_url: null }).eq('id', student.id);
+    const { error: clearError } = await supabase.from('students').update({ intro_video_url: null }).eq('id', student.id);
+    if (clearError) throw clearError;
 
     res.json({ success: true });
   } catch (error) {
