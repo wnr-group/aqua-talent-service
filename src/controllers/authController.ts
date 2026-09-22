@@ -133,6 +133,10 @@ exports.login = async (req: Request, res: Response) => {
       const { data } = await supabase.from('companies').select('*').eq('user_id', user.id).maybeSingle();
       company = data;
 
+      if (!company) {
+        return res.status(403).json({ error: 'Company profile not found for this account' });
+      }
+
       if (company.status === 'pending') {
         return res.status(403).json({
           error: 'Your company account is pending approval'
@@ -293,6 +297,13 @@ exports.registerCompany = async (req: Request, res: Response) => {
       .select()
       .single();
     if (companyError || !company) {
+      // Clean up the orphan user row rather than leaving a users row with no
+      // matching companies row (the exact state that made login's company
+      // lookup dereference a null company - see the guard added there).
+      const { error: cleanupError } = await supabase.from('users').delete().eq('id', user.id);
+      if (cleanupError) {
+        console.error('[registerCompany] Failed to clean up orphan user row after company insert failure', { userId: user.id, error: cleanupError });
+      }
       throw companyError || new Error('Failed to create company');
     }
 
@@ -373,6 +384,12 @@ exports.registerStudent = async (req: Request, res: Response) => {
       .select()
       .single();
     if (studentError || !student) {
+      // Same orphan-row cleanup as registerCompany - don't leave a users row
+      // with no matching students row.
+      const { error: cleanupError } = await supabase.from('users').delete().eq('id', user.id);
+      if (cleanupError) {
+        console.error('[registerStudent] Failed to clean up orphan user row after student insert failure', { userId: user.id, error: cleanupError });
+      }
       throw studentError || new Error('Failed to create student');
     }
 

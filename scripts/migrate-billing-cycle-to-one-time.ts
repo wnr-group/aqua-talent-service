@@ -14,7 +14,8 @@ const runMigration = async () => {
   try {
     const supabase = getSupabaseClient();
 
-    const { data: strayRows } = await supabase.from('available_services').select('id, billing_cycle').neq('billing_cycle', 'one-time');
+    const { data: strayRows, error: strayRowsError } = await supabase.from('available_services').select('id, billing_cycle').neq('billing_cycle', 'one-time');
+    if (strayRowsError) throw strayRowsError;
 
     if (!strayRows || !strayRows.length) {
       console.log('Billing cycle migration: nothing to do, all plans already use one-time.');

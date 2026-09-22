@@ -104,7 +104,9 @@ const run = async () => {
   process.exitCode = mismatches ? 1 : 0;
 };
 
-run().catch((error) => {
-  console.error('Verification failed:', error.message || error);
-  process.exitCode = 1;
-});
+run()
+  .catch((error) => {
+    console.error('Verification failed:', error.message || error);
+    process.exitCode = 1;
+  })
+  .finally(() => disconnectMongo());

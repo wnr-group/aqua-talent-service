@@ -16,6 +16,10 @@
 -- bcrypt (blowfish), so bcrypt.compare() in the Node app verifies it exactly
 -- like a hash produced by the bcrypt npm package.
 --
+-- WARNING: every seeded account below (including the admin user) shares the
+-- password "password123". This is demo/dev fixture data only - never run
+-- `npm run seed` / this file against a production-linked Supabase project.
+--
 -- All seeded accounts use the password: password123
 -- ============================================================================
 
@@ -82,20 +86,30 @@ insert into available_services (
   )
 on conflict (name) do nothing;
 
-insert into plan_zones (plan_id, zone_id) values
-  ('00000000-0000-4000-a002-000000000001', '00000000-0000-4000-a000-000000000001'),
-  ('00000000-0000-4000-a002-000000000001', '00000000-0000-4000-a000-000000000002'),
-  ('00000000-0000-4000-a002-000000000001', '00000000-0000-4000-a000-000000000003'),
-  ('00000000-0000-4000-a002-000000000001', '00000000-0000-4000-a000-000000000004'),
-  ('00000000-0000-4000-a002-000000000002', '00000000-0000-4000-a000-000000000001'),
-  ('00000000-0000-4000-a002-000000000002', '00000000-0000-4000-a000-000000000002'),
-  ('00000000-0000-4000-a002-000000000003', '00000000-0000-4000-a000-000000000001'),
-  ('00000000-0000-4000-a002-000000000003', '00000000-0000-4000-a000-000000000002'),
-  ('00000000-0000-4000-a002-000000000003', '00000000-0000-4000-a000-000000000003'),
-  ('00000000-0000-4000-a002-000000000004', '00000000-0000-4000-a000-000000000001'),
-  ('00000000-0000-4000-a002-000000000004', '00000000-0000-4000-a000-000000000002'),
-  ('00000000-0000-4000-a002-000000000004', '00000000-0000-4000-a000-000000000003'),
-  ('00000000-0000-4000-a002-000000000004', '00000000-0000-4000-a000-000000000004')
+-- available_services is keyed by name (on conflict (name) do nothing above),
+-- so if a plan with one of these names already existed under a different id
+-- (e.g. re-seeded after a manual admin-UI edit), the fixed literal
+-- '00000000-0000-4000-a002-...' ids used elsewhere would NOT be the plan's
+-- actual id. Resolve plan_id by name via a join instead of assuming it.
+insert into plan_zones (plan_id, zone_id)
+select s.id, z.zone_id
+from (
+  values
+    ('Free Tier', '00000000-0000-4000-a000-000000000001'::uuid),
+    ('Free Tier', '00000000-0000-4000-a000-000000000002'::uuid),
+    ('Free Tier', '00000000-0000-4000-a000-000000000003'::uuid),
+    ('Free Tier', '00000000-0000-4000-a000-000000000004'::uuid),
+    ('Starter', '00000000-0000-4000-a000-000000000001'::uuid),
+    ('Starter', '00000000-0000-4000-a000-000000000002'::uuid),
+    ('Pro', '00000000-0000-4000-a000-000000000001'::uuid),
+    ('Pro', '00000000-0000-4000-a000-000000000002'::uuid),
+    ('Pro', '00000000-0000-4000-a000-000000000003'::uuid),
+    ('Premium', '00000000-0000-4000-a000-000000000001'::uuid),
+    ('Premium', '00000000-0000-4000-a000-000000000002'::uuid),
+    ('Premium', '00000000-0000-4000-a000-000000000003'::uuid),
+    ('Premium', '00000000-0000-4000-a000-000000000004'::uuid)
+) as z(plan_name, zone_id)
+join available_services s on s.name = z.plan_name
 on conflict (plan_id, zone_id) do nothing;
 
 -- ── Add-ons ─────────────────────────────────────────────────────────────
@@ -135,8 +149,11 @@ insert into students (id, user_id, student_id, full_name, email, profile_link, s
   ('00000000-0000-4000-a006-000000000001', '00000000-0000-4000-a004-000000000005', 'STU001', 'Rahul Sharma', 'rahul.sharma@gmail.com', 'https://linkedin.com/in/rahulsharma', 'free')
 on conflict (id) do nothing;
 
-insert into active_subscriptions (id, student_id, service_id, start_date, end_date, status, auto_renew, applications_used) values
-  ('00000000-0000-4000-a007-000000000001', '00000000-0000-4000-a006-000000000001', '00000000-0000-4000-a002-000000000001', now(), '2099-12-31T00:00:00Z', 'active', false, 0)
+-- Resolve the Free Tier plan's actual id by name, same reason as plan_zones above.
+insert into active_subscriptions (id, student_id, service_id, start_date, end_date, status, auto_renew, applications_used)
+select '00000000-0000-4000-a007-000000000001', '00000000-0000-4000-a006-000000000001', s.id, now(), '2099-12-31T00:00:00Z', 'active', false, 0
+from available_services s
+where s.name = 'Free Tier'
 on conflict (id) do nothing;
 
 update students

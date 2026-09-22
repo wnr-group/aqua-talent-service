@@ -1012,7 +1012,50 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      decrement_applications_used: {
+        Args: { p_subscription_id: string }
+        Returns: {
+          applications_used: number
+          auto_renew: boolean
+          created_at: string
+          end_date: string | null
+          id: string
+          legacy_id: string | null
+          service_id: string
+          stacked_applications: number
+          start_date: string
+          status: string
+          student_id: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "active_subscriptions"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      increment_applications_used: {
+        Args: { p_subscription_id: string }
+        Returns: {
+          applications_used: number
+          auto_renew: boolean
+          created_at: string
+          end_date: string | null
+          id: string
+          legacy_id: string | null
+          service_id: string
+          stacked_applications: number
+          start_date: string
+          status: string
+          student_id: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "active_subscriptions"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
     }
     Enums: {
       [_ in never]: never

@@ -33,18 +33,13 @@ export const incrementApplicationCount = async (studentId: string) => {
     return null;
   }
 
-  const { data: current } = await supabase
-    .from('active_subscriptions')
-    .select('applications_used')
-    .eq('id', student.current_subscription_id)
-    .maybeSingle();
-
-  const { data: subscription } = await supabase
-    .from('active_subscriptions')
-    .update({ applications_used: (current?.applications_used || 0) + 1 })
-    .eq('id', student.current_subscription_id)
-    .select()
-    .maybeSingle();
+  // Atomic UPDATE ... SET x = x + 1 via a Postgres function (see
+  // supabase/migrations/20260922000002_atomic_application_count.sql) -
+  // a select-then-update here would race under concurrent apply requests.
+  const { data: subscription, error } = await supabase.rpc('increment_applications_used', {
+    p_subscription_id: student.current_subscription_id
+  });
+  if (error) throw error;
 
   return subscription;
 };
@@ -57,24 +52,11 @@ export const decrementApplicationCount = async (studentId: string) => {
     return null;
   }
 
-  // Only decrement if applications_used > 0
-  const { data: current } = await supabase
-    .from('active_subscriptions')
-    .select('applications_used')
-    .eq('id', student.current_subscription_id)
-    .gt('applications_used', 0)
-    .maybeSingle();
-
-  if (!current) {
-    return null;
-  }
-
-  const { data: subscription } = await supabase
-    .from('active_subscriptions')
-    .update({ applications_used: current.applications_used - 1 })
-    .eq('id', student.current_subscription_id)
-    .select()
-    .maybeSingle();
+  // Atomic, clamped at 0 (see supabase/migrations/20260922000002_atomic_application_count.sql).
+  const { data: subscription, error } = await supabase.rpc('decrement_applications_used', {
+    p_subscription_id: student.current_subscription_id
+  });
+  if (error) throw error;
 
   return subscription;
 };

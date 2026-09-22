@@ -82,16 +82,18 @@ const runMigration = async () => {
       .maybeSingle();
 
     if (existingConfig) {
-      await supabase
+      const { error: updateConfigError } = await supabase
         .from('system_config')
         .update({ value: FREE_TIER_MAX_APPLICATIONS, description: 'Maximum applications allowed for free tier' })
         .eq('id', existingConfig.id);
+      if (updateConfigError) throw updateConfigError;
     } else {
-      await supabase.from('system_config').insert({
+      const { error: insertConfigError } = await supabase.from('system_config').insert({
         key: 'free_tier_max_applications',
         value: FREE_TIER_MAX_APPLICATIONS,
         description: 'Maximum applications allowed for free tier'
       });
+      if (insertConfigError) throw insertConfigError;
     }
 
     console.log('Company spotlight cleanup completed.');

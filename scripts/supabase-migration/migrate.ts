@@ -158,7 +158,12 @@ const buildAvailableServices = (loaded: Loaded, idMaps: IdMaps) =>
     price_inr: d.priceINR,
     price_usd: d.priceUSD ?? 0,
     currency: d.currency ?? 'USD',
-    billing_cycle: d.billingCycle ?? 'one-time',
+    // The destination billing_cycle CHECK constraint only accepts 'one-time'
+    // (supabase/migrations/20260921000004_students_and_plans.sql) - legacy
+    // Mongo values ('monthly', 'yearly', 'one_time') must be normalized here
+    // or the insert fails the constraint before scripts/migrate-billing-cycle-
+    // to-one-time.ts ever gets a chance to run.
+    billing_cycle: 'one-time',
     discount: d.discount ?? 0,
     features: Array.isArray(d.features) ? d.features : [],
     badge: d.badge ?? null,
@@ -417,10 +422,14 @@ const run = async () => {
   console.log(`  students.current_subscription_id backfill: ${studentUpdates.length} row(s)`);
 
   if (!EXECUTE) {
-    console.log('\nDry run only - sample row per non-empty table:');
+    // Print only column names + id, never row values - many of these tables
+    // carry password hashes, reset tokens, emails, or gateway responses, and
+    // this dry-run output routinely ends up in terminal scrollback/CI logs.
+    console.log('\nDry run only - columns and id for the first row of each non-empty table:');
     for (const [table, rows] of tableRows) {
       if (rows.length) {
-        console.log(`\n[${table}]`, JSON.stringify(rows[0], null, 2));
+        const sample = rows[0] as Record<string, unknown>;
+        console.log(`\n[${table}] id=${String(sample.id)} columns=[${Object.keys(sample).join(', ')}]`);
       }
     }
     console.log('\nRe-run with --execute to write these rows to Supabase.');
@@ -465,7 +474,9 @@ const run = async () => {
   await disconnectMongo();
 };
 
-run().catch((error) => {
-  console.error('\nMigration failed:', error.message || error);
-  process.exitCode = 1;
-});
+run()
+  .catch((error) => {
+    console.error('\nMigration failed:', error.message || error);
+    process.exitCode = 1;
+  })
+  .finally(() => disconnectMongo());

@@ -46,7 +46,7 @@ npm start        # plain node
 | `npm run typecheck` | Type-check without emitting (`tsc --noEmit`) |
 | `npm run supabase:migrate` | Apply pending SQL migrations to the linked Supabase project (`supabase db push`) |
 | `npm run supabase:types` | Regenerate `src/lib/supabase/database.types.ts` from the linked project's schema |
-| `npm run seed` | Run `supabase/seed.sql` against the linked project |
+| `npm run seed` | Run `supabase/seed.sql` against the linked project. **Dev/demo only** - every seeded account shares the password `password123`. Never run against a production-linked project. |
 
 ## Database (Supabase Postgres)
 

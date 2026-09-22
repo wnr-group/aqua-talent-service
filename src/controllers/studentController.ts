@@ -18,6 +18,12 @@ const isValidUuid = (value: any): boolean => typeof value === 'string' && UUID_R
 
 const escapeLike = (value: string): string => value.replace(/[\\%_]/g, (c) => `\\${c}`);
 
+// PostgREST's or()/filter DSL treats "," as a condition separator and "(" ")"
+// as grouping - wrapping a value in double quotes (escaping \ and " inside)
+// stops search input containing those characters from restructuring the
+// filter expression. Must be applied AFTER escapeLike, wrapping its output.
+const quoteFilterValue = (value: string): string => `"${value.replace(/[\\"]/g, (c) => `\\${c}`)}"`;
+
 const getStudentForUser = async (userId: string) => {
   const { data: student } = await supabase.from('students').select('*').eq('user_id', userId).maybeSingle();
   return student;
@@ -196,8 +202,8 @@ exports.getJobs = async (req: AuthedRequest, res: Response) => {
     if (jobType) query = query.eq('job_type', jobType);
     if (location) query = query.ilike('location', `%${escapeLike(location)}%`);
     if (search) {
-      const escaped = escapeLike(search);
-      query = query.or(`title.ilike.%${escaped}%,description.ilike.%${escaped}%`);
+      const pattern = quoteFilterValue(`%${escapeLike(search)}%`);
+      query = query.or(`title.ilike.${pattern},description.ilike.${pattern}`);
     }
 
     const pageNum = Math.max(1, parseInt(page) || 1);

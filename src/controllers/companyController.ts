@@ -36,6 +36,12 @@ const isValidUuid = (value: any): boolean => typeof value === 'string' && UUID_R
 // Escapes Postgres ILIKE special characters (%, _, \) - equivalent to the old escapeRegex helper.
 const escapeLike = (value: string): string => value.replace(/[\\%_]/g, (c) => `\\${c}`);
 
+// PostgREST's or()/filter DSL treats "," as a condition separator and "(" ")"
+// as grouping - wrapping a value in double quotes (escaping \ and " inside)
+// stops search input containing those characters from restructuring the
+// filter expression. Must be applied AFTER escapeLike, wrapping its output.
+const quoteFilterValue = (value: string): string => `"${value.replace(/[\\"]/g, (c) => `\\${c}`)}"`;
+
 // Check if email is taken by another user (excluding current company)
 const isEmailTakenByOther = async (email: string, currentCompanyId: string): Promise<boolean> => {
   const normalizedEmail = email.toLowerCase().trim();
@@ -181,8 +187,8 @@ exports.getJobs = async (req: AuthedRequest, res: Response) => {
     if (jobType) query = query.eq('job_type', jobType);
     if (location) query = query.ilike('location', `%${escapeLike(location)}%`);
     if (search) {
-      const escaped = escapeLike(search);
-      query = query.or(`title.ilike.%${escaped}%,description.ilike.%${escaped}%`);
+      const pattern = quoteFilterValue(`%${escapeLike(search)}%`);
+      query = query.or(`title.ilike.${pattern},description.ilike.${pattern}`);
     }
 
     const { data: jobs, count, error } = await query.order('created_at', { ascending: false }).range(from, to);

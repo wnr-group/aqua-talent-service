@@ -326,6 +326,12 @@ exports.setCompanyActiveStatus = async (req: Request, res: Response) => {
 
 const escapeLike = (value: string): string => value.replace(/[\\%_]/g, (c) => `\\${c}`);
 
+// PostgREST's or()/filter DSL treats "," as a condition separator and "(" ")"
+// as grouping - wrapping a value in double quotes (escaping \ and " inside)
+// stops search input containing those characters from restructuring the
+// filter expression. Must be applied AFTER escapeLike, wrapping its output.
+const quoteFilterValue = (value: string): string => `"${value.replace(/[\\"]/g, (c) => `\\${c}`)}"`;
+
 exports.getJobs = async (req: Request, res: Response) => {
   try {
     const { status, search, location, jobType, page = 1, limit = 10 } = req.query as Record<string, any>;
@@ -347,8 +353,8 @@ exports.getJobs = async (req: Request, res: Response) => {
     if (jobType) query = query.eq('job_type', jobType);
     if (location) query = query.ilike('location', `%${escapeLike(location)}%`);
     if (search) {
-      const escaped = escapeLike(search);
-      query = query.or(`title.ilike.%${escaped}%,description.ilike.%${escaped}%`);
+      const pattern = quoteFilterValue(`%${escapeLike(search)}%`);
+      query = query.or(`title.ilike.${pattern},description.ilike.${pattern}`);
     }
 
     const { data: jobs, count, error } = await query.order('created_at', { ascending: false }).range(from, to);
@@ -695,8 +701,8 @@ exports.getStudents = async (req: Request, res: Response) => {
       query = hasVideo === 'true' ? query.not('intro_video_url', 'is', null) : query.is('intro_video_url', null);
     }
     if (search) {
-      const escaped = escapeLike(search);
-      query = query.or(`full_name.ilike.%${escaped}%,email.ilike.%${escaped}%,student_id.ilike.%${escaped}%`);
+      const pattern = quoteFilterValue(`%${escapeLike(search)}%`);
+      query = query.or(`full_name.ilike.${pattern},email.ilike.${pattern},student_id.ilike.${pattern}`);
     }
 
     const { data: students, error } = await query.order('created_at', { ascending: false });

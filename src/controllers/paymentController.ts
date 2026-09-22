@@ -652,6 +652,18 @@ exports.verifyZoneAddonPayment = async (req: AuthedRequest, res: Response) => {
 
     const subscriptionId: string = student.current_subscription_id;
 
+    // The signature is stable for a given order/payment, so a client that
+    // re-posts the same verified body must not gain additional addon
+    // quantity/zones each time - return the prior result idempotently.
+    const { data: existingPayment } = await supabase
+      .from('payment_records')
+      .select('id')
+      .eq('razorpay_payment_id', razorpay_payment_id)
+      .maybeSingle();
+    if (existingPayment) {
+      return res.json({ success: true, paymentId: razorpay_payment_id });
+    }
+
     const { data: paymentRecord, error: payError } = await supabase
       .from('payment_records')
       .insert({
@@ -948,6 +960,18 @@ exports.verifyJobsAddonPayment = async (req: AuthedRequest, res: Response) => {
     const { data: addon } = await supabase.from('addons').select('*').eq('id', addonId).maybeSingle();
     if (!addon || addon.type !== 'jobs') {
       return res.status(400).json({ error: 'Invalid addon' });
+    }
+
+    // The signature is stable for a given order/payment, so a client that
+    // re-posts the same verified body must not gain additional job credits
+    // each time - return the prior result idempotently.
+    const { data: existingPayment } = await supabase
+      .from('payment_records')
+      .select('id')
+      .eq('razorpay_payment_id', razorpay_payment_id)
+      .maybeSingle();
+    if (existingPayment) {
+      return res.json({ success: true, paymentId: razorpay_payment_id, jobCreditsAdded: addon.job_credit_count });
     }
 
     const { data: paymentRecord, error: payError } = await supabase

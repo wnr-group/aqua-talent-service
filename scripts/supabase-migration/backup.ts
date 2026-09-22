@@ -42,7 +42,9 @@ const run = async () => {
   await disconnectMongo();
 };
 
-run().catch((error) => {
-  console.error('Backup failed:', error);
-  process.exitCode = 1;
-});
+run()
+  .catch((error) => {
+    console.error('Backup failed:', error);
+    process.exitCode = 1;
+  })
+  .finally(() => disconnectMongo());
