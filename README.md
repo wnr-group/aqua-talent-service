@@ -29,14 +29,6 @@ npm install
 cp .env.example .env
 ```
 
-Fill in the values - see `.env.example` for the full list. Key groups:
-
-- **Supabase** - `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY`. Used for both the Postgres client (`src/lib/supabase/client.ts`) and file storage (`src/services/mediaService.js`) - no separate storage credentials needed.
-- **JWT** - `JWT_SECRET`.
-- **Email** - `MAILGUN_*`.
-- **Payments** - `RAZORPAY_*`.
-- **MongoDB** - `MONGODB_URI` is only needed if you're running the one-time migration tooling in `scripts/supabase-migration/`; the running app never touches Mongo.
-
 ### Run
 
 ```bash
@@ -108,11 +100,3 @@ npm run supabase:types
 ```
 
 Overwrites `src/lib/supabase/database.types.ts` from the linked project's current schema. Run this after any migration that changes tables/columns.
-
-## File Storage
-
-Three private Supabase Storage buckets - `company-logos`, `student-resumes`, `student-videos` - are created by `supabase/migrations/20260922000001_media_storage_bucket.sql`, with size/mime constraints matching the multer limits in `src/middleware/upload.ts`. Uploads and signed URLs go through `src/services/mediaService.js` using the same Supabase client as the database (no AWS/S3 credentials required).
-
-## Legacy Mongo migration tooling
-
-`scripts/supabase-migration/` contains the one-time backup/migrate/verify scripts used to move data from MongoDB to Supabase. They're not part of the running app and only need `MONGODB_URI` set if you ever need to re-run them.
