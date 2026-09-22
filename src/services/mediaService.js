@@ -1,35 +1,31 @@
 const crypto = require('crypto');
-const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { getSupabaseClient } = require('../lib/supabase/client');
 
-const BUCKETEER_AWS_REGION = process.env.BUCKETEER_AWS_REGION;
-const BUCKETEER_BUCKET_NAME = process.env.BUCKETEER_BUCKET_NAME;
+// One bucket per content type, created by
+// supabase/migrations/20260922000001_media_storage_bucket.sql. Keys keep
+// their existing prefix (company-logos/, student-resumes/, student-videos/)
+// so the bucket for an already-stored key can still be resolved without a
+// DB schema change.
+const BUCKETS = {
+  logo: 'company-logos',
+  resume: 'student-resumes',
+  video: 'student-videos'
+};
 
-let s3Client;
+const bucketForKey = (key) => {
+  const prefix = key.split('/')[0];
+  const bucket = Object.values(BUCKETS).find((id) => id === prefix);
+
+  if (!bucket) {
+    throw new Error(`Unrecognized media key prefix: ${prefix}`);
+  }
+
+  return bucket;
+};
 
 const MAX_RESUME_BYTES = 5 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 30 * 1024 * 1024;
 const PRESIGNED_URL_EXPIRY = 3600; // 1 hour
-
-const getS3Client = () => {
-  if (!BUCKETEER_AWS_REGION) {
-    throw new Error('BUCKETEER_AWS_REGION is not configured');
-  }
-
-  if (!s3Client) {
-    s3Client = new S3Client({
-      region: BUCKETEER_AWS_REGION,
-      credentials: process.env.BUCKETEER_AWS_ACCESS_KEY_ID && process.env.BUCKETEER_AWS_SECRET_ACCESS_KEY
-        ? {
-            accessKeyId: process.env.BUCKETEER_AWS_ACCESS_KEY_ID,
-            secretAccessKey: process.env.BUCKETEER_AWS_SECRET_ACCESS_KEY
-          }
-        : undefined
-    });
-  }
-
-  return s3Client;
-};
 
 const extensionFromMime = (mime) => {
   if (!mime) {
@@ -45,12 +41,6 @@ const extensionFromMime = (mime) => {
   return mapping[mime] || 'png';
 };
 
-const assertBucketConfigured = () => {
-  if (!BUCKETEER_BUCKET_NAME) {
-    throw new Error('BUCKETEER_BUCKET_NAME is not configured');
-  }
-};
-
 const sanitizeFilename = (filename = 'video.mp4') => {
   const normalized = filename.trim() || 'video.mp4';
   return normalized.replace(/[^a-zA-Z0-9.\-_]/g, '-');
@@ -61,15 +51,16 @@ const getPresignedUrl = async (key) => {
     return null;
   }
 
-  assertBucketConfigured();
-  const client = getS3Client();
+  const supabase = getSupabaseClient();
+  const bucket = bucketForKey(key);
 
-  const command = new GetObjectCommand({
-    Bucket: BUCKETEER_BUCKET_NAME,
-    Key: key
-  });
+  const { data, error } = await supabase.storage.from(bucket).createSignedUrl(key, PRESIGNED_URL_EXPIRY);
 
-  return getSignedUrl(client, command, { expiresIn: PRESIGNED_URL_EXPIRY });
+  if (error) {
+    throw new Error(`Failed to generate signed URL: ${error.message}`);
+  }
+
+  return data.signedUrl;
 };
 
 const uploadCompanyLogo = async (file) => {
@@ -77,19 +68,17 @@ const uploadCompanyLogo = async (file) => {
     throw new Error('Missing file buffer');
   }
 
-  assertBucketConfigured();
-
-  const client = getS3Client();
+  const supabase = getSupabaseClient();
   const key = `company-logos/${crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex')}.${extensionFromMime(file.mimetype)}`;
 
-  const command = new PutObjectCommand({
-    Bucket: BUCKETEER_BUCKET_NAME,
-    Key: key,
-    Body: file.buffer,
-    ContentType: file.mimetype || 'application/octet-stream'
+  const { error } = await supabase.storage.from(BUCKETS.logo).upload(key, file.buffer, {
+    contentType: file.mimetype || 'application/octet-stream'
   });
 
-  await client.send(command);
+  if (error) {
+    throw new Error(`Failed to upload company logo: ${error.message}`);
+  }
+
   return key;
 };
 
@@ -105,11 +94,9 @@ const uploadStudentResume = async (file) => {
     throw new Error('Missing file buffer');
   }
 
-  assertBucketConfigured();
-
   if (!file.mimetype || !file.mimetype.toLowerCase().includes('pdf')) {
-  throw new Error('Resume must be a PDF');
-}
+    throw new Error('Resume must be a PDF');
+  }
 
   if (file.size > MAX_RESUME_BYTES) {
     throw new Error('Resume exceeds maximum size');
@@ -118,20 +105,18 @@ const uploadStudentResume = async (file) => {
   if (!isPdfBuffer(file.buffer)) {
     throw new Error('Uploaded file is not a valid PDF');
   }
-  console.log("MIME:", file.mimetype);
-console.log("SIZE:", file.size);
 
-  const client = getS3Client();
+  const supabase = getSupabaseClient();
   const key = `student-resumes/${crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex')}.pdf`;
 
-  const command = new PutObjectCommand({
-    Bucket: BUCKETEER_BUCKET_NAME,
-    Key: key,
-    Body: file.buffer,
-    ContentType: 'application/pdf'
+  const { error } = await supabase.storage.from(BUCKETS.resume).upload(key, file.buffer, {
+    contentType: 'application/pdf'
   });
 
-  await client.send(command);
+  if (error) {
+    throw new Error(`Failed to upload resume: ${error.message}`);
+  }
+
   return key;
 };
 
@@ -144,8 +129,6 @@ const uploadStudentVideo = async (file, studentId) => {
     throw new Error('Student ID is required for video upload');
   }
 
-  assertBucketConfigured();
-
   if (!file.mimetype || !file.mimetype.startsWith('video/')) {
     throw new Error('Video must be a valid video file');
   }
@@ -154,18 +137,18 @@ const uploadStudentVideo = async (file, studentId) => {
     throw new Error('Video must be under 30MB');
   }
 
-  const client = getS3Client();
+  const supabase = getSupabaseClient();
   const safeName = sanitizeFilename(file.originalname || 'intro-video.mp4');
   const key = `student-videos/${studentId}/${Date.now()}-${safeName}`;
 
-  const command = new PutObjectCommand({
-    Bucket: BUCKETEER_BUCKET_NAME,
-    Key: key,
-    Body: file.buffer,
-    ContentType: file.mimetype
+  const { error } = await supabase.storage.from(BUCKETS.video).upload(key, file.buffer, {
+    contentType: file.mimetype
   });
 
-  await client.send(command);
+  if (error) {
+    throw new Error(`Failed to upload video: ${error.message}`);
+  }
+
   return key;
 };
 
