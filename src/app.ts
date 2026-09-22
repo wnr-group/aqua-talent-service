@@ -1,8 +1,9 @@
-const express = require('express');
-const cors = require('cors');
-const { getSupabaseClient } = require('./lib/supabase/client');
+import express, { Request, Response } from 'express';
+import cors from 'cors';
+import { getSupabaseClient } from './lib/supabase/client';
 
 const app = express();
+
 const authRoutes = require('./routes/authRoutes');
 const companyRoutes = require('./routes/companyRoutes');
 const studentRoutes = require('./routes/studentRoutes');
@@ -34,8 +35,10 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
+type RawBodyRequest = Request & { rawBody?: string };
+
 app.use(express.json({
-  verify: (req, res, buffer) => {
+  verify: (req: RawBodyRequest, res: Response, buffer: Buffer) => {
     if (!buffer?.length) {
       return;
     }
@@ -63,16 +66,19 @@ app.post('/api/webhooks/razorpay', paymentController.handleWebhook);
 app.get('/api/geo-location', paymentController.getGeoLocation);
 app.use('/', unsubscribeRoutes);
 
+// testMailRoutes.mjs is intentionally native ESM (see routes conversion
+// commit) and isn't part of the tsc program, so it has no type declarations.
+// @ts-expect-error - TS7016: no declaration file for this dynamic import target
 import('./routes/testMailRoutes.mjs')
-  .then(({ default: testMailRouter }) => {
+  .then(({ default: testMailRouter }: any) => {
     app.use('/api', testMailRouter);
   })
-  .catch((error) => {
+  .catch((error: unknown) => {
     console.error('[test-mail] Failed to register test mail route', error);
   });
 
 // Health check
-app.get('/api/health', async (req, res) => {
+app.get('/api/health', async (req: Request, res: Response) => {
   let database = 'disconnected';
 
   try {
@@ -92,4 +98,7 @@ app.get('/api/health', async (req, res) => {
   });
 });
 
-module.exports = app;
+// `export =` (rather than `export default`) so require('./app') in
+// server.js gets the app instance directly, exactly matching the
+// original module.exports shape.
+export = app;

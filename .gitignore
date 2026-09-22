@@ -24,6 +24,12 @@ build/
 # still hand-written CommonJS) are listed file-by-file so the real sources
 # never get hidden by accident.
 
+# TS-only root entry files
+src/app.js
+src/app.js.map
+src/server.js
+src/server.js.map
+
 # TS-only folders
 src/lib/**/*.js
 src/lib/**/*.js.map
