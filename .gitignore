@@ -73,6 +73,10 @@ src/services/zonePricingService.js
 src/services/zonePricingService.js.map
 src/utils/zonePricingSetup.js
 src/utils/zonePricingSetup.js.map
+src/utils/emailLogger.js
+src/utils/emailLogger.js.map
+src/utils/validation.js
+src/utils/validation.js.map
 src/routes/adminRoutes.js
 src/routes/adminRoutes.js.map
 src/routes/authRoutes.js

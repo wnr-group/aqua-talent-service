@@ -1,4 +1,6 @@
-const { z } = require('zod');
+import { z } from 'zod';
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
   JOB_TYPES,
   COMPANY_STATUSES,
@@ -76,10 +78,10 @@ const studentRegistrationSchema = z.object({
   email: z.string().email(),
 
   password: z.string().min(8),
-  
+
   isDGShipping: z.enum(['yes', 'no'], {
-  required_error: 'Please select an option',
-}),
+    error: 'Please select an option',
+  }),
 
   profileLink: z.string()
     .url()
@@ -105,8 +107,8 @@ const createJobSchema = z.object({
     .min(2, 'Location must be 2-100 characters')
     .max(100, 'Location must be 2-100 characters')
     .trim(),
-  jobType: z.enum(JOB_TYPES, {
-    errorMap: () => ({ message: `Job type must be one of: ${JOB_TYPES.join(', ')}` })
+  jobType: z.enum(JOB_TYPES as [string, ...string[]], {
+    error: `Job type must be one of: ${JOB_TYPES.join(', ')}`
   }),
   salaryRange: z.string()
     .min(1, 'Salary range is required')
@@ -122,7 +124,7 @@ const updateJobSchema = createJobSchema.partial();
 
 // Draft jobs allow incomplete data — no validation required
 // Preprocess empty strings to undefined so optional() works correctly
-const emptyToUndefined = (val) => (val === '' || val === null || val === undefined) ? undefined : val;
+const emptyToUndefined = (val: unknown) => (val === '' || val === null || val === undefined) ? undefined : val;
 
 const createDraftJobSchema = z.object({
   title: z.preprocess(emptyToUndefined, z.string()
@@ -141,8 +143,8 @@ const createDraftJobSchema = z.object({
     .max(100, 'Location must be at most 100 characters')
     .trim()
     .optional()),
-  jobType: z.preprocess(emptyToUndefined, z.enum(JOB_TYPES, {
-    errorMap: () => ({ message: `Job type must be one of: ${JOB_TYPES.join(', ')}` })
+  jobType: z.preprocess(emptyToUndefined, z.enum(JOB_TYPES as [string, ...string[]], {
+    error: `Job type must be one of: ${JOB_TYPES.join(', ')}`
   }).optional()),
   salaryRange: z.preprocess(emptyToUndefined, z.string()
     .max(50, 'Salary range must be less than 50 characters')
@@ -155,8 +157,8 @@ const createDraftJobSchema = z.object({
 }).passthrough();
 
 const updateCompanyStatusSchema = z.object({
-  status: z.enum(COMPANY_STATUSES, {
-    errorMap: () => ({ message: 'Status must be approved, rejected, or pending' })
+  status: z.enum(COMPANY_STATUSES as [string, ...string[]], {
+    error: 'Status must be approved, rejected, or pending'
   }),
   rejectionReason: z.string().trim().optional()
 }).refine(data => {
@@ -170,15 +172,15 @@ const updateCompanyStatusSchema = z.object({
 });
 
 const updateJobStatusSchema = z.object({
-  status: z.enum(JOB_STATUSES, {
-    errorMap: () => ({ message: `Status must be one of: ${JOB_STATUSES.join(', ')}` })
+  status: z.enum(JOB_STATUSES as [string, ...string[]], {
+    error: `Status must be one of: ${JOB_STATUSES.join(', ')}`
   }),
   rejectionReason: z.string().trim().optional()
 });
 
 const adminUpdateApplicationSchema = z.object({
   status: z.enum(['reviewed', 'rejected'], {
-    errorMap: () => ({ message: 'Admin can only set status to reviewed or rejected' })
+    error: 'Admin can only set status to reviewed or rejected'
   }),
   rejectionReason: z.string().trim().optional()
 });
@@ -191,7 +193,7 @@ const nullableUrlSchema = z.union([
   z.null()
 ]).optional();
 
-const nullableEnum = (values) => z.union([
+const nullableEnum = (values: any) => z.union([
   z.enum(values),
   z.literal(''),
   z.null()
@@ -238,7 +240,10 @@ const resetPasswordSchema = z.object({
   password: z.string().min(8, 'Password must be at least 8 characters')
 });
 
-module.exports = {
+// `export =` (rather than `export default`) so require('../utils/validation')
+// in any remaining plain .js file gets these schemas directly, exactly
+// matching the original module.exports shape.
+export = {
   companyRegisterSchema,
   studentRegistrationSchema,
   createJobSchema,
