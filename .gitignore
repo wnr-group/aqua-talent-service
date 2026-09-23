@@ -14,6 +14,103 @@ logs
 dist/
 build/
 
+# TypeScript build output co-located with .ts sources (tsconfig.json has no
+# outDir - compiled .js lands right next to its .ts so require() from the
+# remaining plain CommonJS files keeps resolving). sourceMap is off, but the
+# .js.map patterns stay in case it's ever re-enabled locally.
+#
+# Folders that are TS-only (no hand-written .js survives there) can be
+# ignored wholesale. Folders with a genuine mix (some files converted, some
+# still hand-written CommonJS) are listed file-by-file so the real sources
+# never get hidden by accident.
+
+# TS-only root entry files
+src/app.js
+src/app.js.map
+src/server.js
+src/server.js.map
+
+# TS-only folders
+src/lib/**/*.js
+src/lib/**/*.js.map
+src/lib/**/*.d.ts
+src/lib/**/*.d.ts.map
+scripts/supabase-migration/**/*.js
+scripts/supabase-migration/**/*.js.map
+src/config/*.js
+src/config/*.js.map
+src/constants/*.js
+src/constants/*.js.map
+src/middleware/*.js
+src/middleware/*.js.map
+scripts/*.js
+scripts/*.js.map
+
+# Mixed folders - only the files with a .ts source are compiled output.
+src/controllers/adminController.js
+src/controllers/adminController.js.map
+src/controllers/authController.js
+src/controllers/authController.js.map
+src/controllers/companyController.js
+src/controllers/companyController.js.map
+src/controllers/notificationController.js
+src/controllers/notificationController.js.map
+src/controllers/paymentController.js
+src/controllers/paymentController.js.map
+src/controllers/studentController.js
+src/controllers/studentController.js.map
+src/controllers/studentMediaController.js
+src/controllers/studentMediaController.js.map
+src/controllers/subscriptionController.js
+src/controllers/subscriptionController.js.map
+src/services/applicationService.js
+src/services/applicationService.js.map
+src/services/companyProfileService.js
+src/services/companyProfileService.js.map
+src/services/notificationPreferenceService.js
+src/services/notificationPreferenceService.js.map
+src/services/notificationService.js
+src/services/notificationService.js.map
+src/services/subscriptionService.js
+src/services/subscriptionService.js.map
+src/services/zoneAccessService.js
+src/services/zoneAccessService.js.map
+src/services/zonePricingService.js
+src/services/zonePricingService.js.map
+src/utils/zonePricingSetup.js
+src/utils/zonePricingSetup.js.map
+src/utils/emailLogger.js
+src/utils/emailLogger.js.map
+src/utils/validation.js
+src/utils/validation.js.map
+src/routes/adminRoutes.js
+src/routes/adminRoutes.js.map
+src/routes/authRoutes.js
+src/routes/authRoutes.js.map
+src/routes/companyRoutes.js
+src/routes/companyRoutes.js.map
+src/routes/mediaRoutes.js
+src/routes/mediaRoutes.js.map
+src/routes/notificationRoutes.js
+src/routes/notificationRoutes.js.map
+src/routes/paymentRoutes.js
+src/routes/paymentRoutes.js.map
+src/routes/publicCompanyRoutes.js
+src/routes/publicCompanyRoutes.js.map
+src/routes/serviceRoutes.js
+src/routes/serviceRoutes.js.map
+src/routes/studentRoutes.js
+src/routes/studentRoutes.js.map
+src/routes/subscriptionRoutes.js
+src/routes/subscriptionRoutes.js.map
+src/routes/unsubscribeRoutes.js
+src/routes/unsubscribeRoutes.js.map
+# src/routes/testMailRoutes.mjs is hand-written native ESM (dynamically
+# imported in app.js) - not compiled by tsc, stays tracked as-is.
+
+# Mongo backups contain real user data - never commit them.
+backups/
+
 # Debugging
 .vscode/
 .idea/
