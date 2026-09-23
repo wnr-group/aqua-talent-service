@@ -1,18 +1,32 @@
--- Explicit RLS policies for every table.
+-- Rename the service_role RLS policies (created by the loop in
+-- 20260921000009_rls_policies.sql as "service_role_full_access" on every
+-- table) to explicit, per-table names. Editing an already-applied migration
+-- file has no effect on a remote database, since supabase db push tracks
+-- applied migrations by version, not content - so this is a real migration
+-- that drops the old policies and recreates them under the new names.
 --
--- Access model: this app has no Supabase Auth and no direct frontend-to-
--- Supabase traffic - the Express backend is the only caller, always using
--- the service-role key. service_role bypasses RLS by default regardless of
--- policies, so these are defense-in-depth / documentation, not a functional
--- requirement: they make the intended access model explicit and auditable,
--- and if this project is ever connected to from anon/authenticated context
--- (e.g. a future public read API, Supabase Auth adoption), there is no
--- accidental open access to fall back on - everything stays default-deny
--- until a policy is deliberately added for that role.
---
--- RLS is already enabled per table in each table's own creation migration
--- (e.g. 20260921000002_users_and_companies.sql); this file only adds the
--- policies.
+-- Purely a naming/format change: same tables, same service_role-only access,
+-- same USING (true) WITH CHECK (true).
+
+DROP POLICY IF EXISTS "service_role_full_access" ON users;
+DROP POLICY IF EXISTS "service_role_full_access" ON companies;
+DROP POLICY IF EXISTS "service_role_full_access" ON students;
+DROP POLICY IF EXISTS "service_role_full_access" ON zones;
+DROP POLICY IF EXISTS "service_role_full_access" ON zone_countries;
+DROP POLICY IF EXISTS "service_role_full_access" ON available_services;
+DROP POLICY IF EXISTS "service_role_full_access" ON active_subscriptions;
+DROP POLICY IF EXISTS "service_role_full_access" ON job_postings;
+DROP POLICY IF EXISTS "service_role_full_access" ON applications;
+DROP POLICY IF EXISTS "service_role_full_access" ON payment_records;
+DROP POLICY IF EXISTS "service_role_full_access" ON pay_per_job_purchases;
+DROP POLICY IF EXISTS "service_role_full_access" ON addons;
+DROP POLICY IF EXISTS "service_role_full_access" ON plan_zones;
+DROP POLICY IF EXISTS "service_role_full_access" ON subscription_addons;
+DROP POLICY IF EXISTS "service_role_full_access" ON subscription_zones;
+DROP POLICY IF EXISTS "service_role_full_access" ON system_config;
+DROP POLICY IF EXISTS "service_role_full_access" ON notifications;
+DROP POLICY IF EXISTS "service_role_full_access" ON notification_preferences;
+DROP POLICY IF EXISTS "service_role_full_access" ON password_reset_tokens;
 
 CREATE POLICY "Enable all operations for service_role on users" ON users FOR ALL TO service_role USING (true) WITH CHECK (true);
 CREATE POLICY "Enable all operations for service_role on companies" ON companies FOR ALL TO service_role USING (true) WITH CHECK (true);
